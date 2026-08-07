@@ -1,0 +1,122 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,\n               p.average_time, p.title, u.name AS author\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        WHERE p.hidden_at IS NULL\n        ORDER BY p.created_at DESC, p.id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "short_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "short_key"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "likes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "likes"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "downloads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "downloads"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "completions",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "completions"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "difficulty",
+        "type_info": "Float4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "difficulty"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "average_time",
+        "type_info": "Float4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "average_time"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "author",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a26a076449f0b78bca482514af6182fc51f6d56e2ab0cd11d5e523b906958d3b"
+}
