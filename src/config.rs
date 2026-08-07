@@ -54,7 +54,10 @@ mod tests {
 
     fn full_map() -> HashMap<&'static str, &'static str> {
         HashMap::from([
-            ("DATABASE_URL", "postgres://savez:savez@localhost:5432/savez"),
+            (
+                "DATABASE_URL",
+                "postgres://savez:savez@localhost:5432/savez",
+            ),
             ("JWT_KEY", "test-key"),
             ("OFFICIAL_API_URL", "https://api.shapez.io"),
             ("PORT", "15001"),
