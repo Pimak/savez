@@ -1,46 +1,46 @@
 # Savez
 
-Backend Rust auto-hébergé et open source pour le mode puzzle communautaire de shapez 1, avec un objectif de conservation.
+Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with a preservation goal.
 
-> **Statut : Draft.** L'ensemble du projet est conditionné à l'accord de tobspr, sollicité par mail le 6 août 2026, sur trois principes : validation de possession via l'API officielle, export par les créateurs de leurs propres puzzles uniquement, et coopération future sur la préservation du catalogue. Le développement se poursuit en attendant la réponse ; le périmètre pourra être révisé selon l'issue de cet échange.
+> **Status: Draft.** The entire project is conditioned on tobspr's agreement, requested by email on August 6, 2026, on three principles: ownership validation via the official API, export by creators of their own puzzles only, and future cooperation on catalog preservation. Development continues while awaiting a response; scope may be revised depending on the outcome of that exchange.
 
-## Objectifs
+## Goals
 
-**Objectif principal :** pérenniser l'expérience puzzle communautaire de shapez 1 via un backend auto-hébergé, open source, indépendant de l'infrastructure officielle (`api.shapez.io`).
+**Primary goal:** preserve shapez 1's community puzzle experience through a self-hosted, open-source backend, independent of the official infrastructure (`api.shapez.io`).
 
-**Objectifs secondaires :**
+**Secondary goals:**
 
-- Offrir aux créateurs un outil de portabilité de leurs propres puzzles depuis le service officiel.
-- Ne pas nuire au modèle commercial du DLC Puzzle tant que le service officiel est en vie (accès réservé aux possesseurs du DLC).
-- Servir de projet d'apprentissage Rust pour l'auteur.
+- Give creators a tool to port their own puzzles away from the official service.
+- Avoid harming the Puzzle DLC's commercial model while the official service is alive (access restricted to DLC owners).
+- Serve as a Rust learning project for the author.
 
-## Non-objectifs
+## Non-goals
 
-- Copier le catalogue communautaire officiel (aucun scraping de contenu tiers).
-- Se substituer au service officiel tant qu'il fonctionne.
-- Version web du client (alignement sur la Community Edition : standalone uniquement).
+- Copying the official community catalog (no scraping of third-party content).
+- Replacing the official service while it remains operational.
+- A web version of the client (aligned with the Community Edition: standalone only).
 
-## Statut du développement
+## Development status
 
-Le projet en est à la **phase 1 sur 12** (fondations projet). Voir `docs/cahier-des-charges.md` pour la spécification complète et `.planning/ROADMAP.md` pour la feuille de route détaillée.
+The project is currently in **phase 1 of 12** (project foundations). See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
 
-## Licence
+## License
 
-Ce backend est distribué sous licence **AGPL-3.0** (voir `LICENSE`) : toute personne
-hébergeant une version modifiée de ce serveur doit publier ses sources modifiées.
+This backend is distributed under the **AGPL-3.0** license (see `LICENSE`): anyone
+hosting a modified version of this server must publish their modified sources.
 
-> À noter : si du code est repris du projet [gatez-backend](https://github.com/armandosneto/gatez-backend)
-> (MIT, copyright Armando Soares e Silva Neto et Rafael Nunes Santana), le fichier
-> `LICENSE-MIT` correspondant sera ajouté à ce dépôt au moment de la reprise, conformément
-> aux termes de la licence MIT d'origine. À ce jour, aucun code n'a été repris de ce projet.
+> Note: if code is reused from the [gatez-backend](https://github.com/armandosneto/gatez-backend)
+> project (MIT, copyright Armando Soares e Silva Neto and Rafael Nunes Santana), the corresponding
+> `LICENSE-MIT` file will be added to this repository at the time of reuse, in accordance with
+> the terms of the original MIT license. To date, no code has been reused from that project.
 
-Le futur mod client (compatible avec le jeu [shapez 1](https://github.com/tobspr-games/shapez.io)) sera quant à lui distribué sous **GPLv3**, en tant qu'œuvre dérivée du client GPL du jeu, conformément à la section 3.1 du cahier des charges.
+The future client mod (compatible with the [shapez 1](https://github.com/tobspr-games/shapez.io) game) will be distributed under **GPLv3**, as a derivative work of the game's GPL client, in accordance with section 3.1 of the specification document.
 
-## Auteur
+## Author
 
 Maxime Mainguet ([Pimak](https://github.com/Pimak)).
 
-## Références
+## References
 
-- [tobspr-games/shapez.io](https://github.com/tobspr-games/shapez.io) — client officiel shapez 1, contrat d'API et types de données ciblés par ce backend.
-- [armandosneto/gatez-backend](https://github.com/armandosneto/gatez-backend) — backend communautaire de référence (MIT), schéma de données et logique métier transposés.
+- [tobspr-games/shapez.io](https://github.com/tobspr-games/shapez.io) — official shapez 1 client, API contract and data types targeted by this backend.
+- [armandosneto/gatez-backend](https://github.com/armandosneto/gatez-backend) — reference community backend (MIT), data schema and business logic transposed from it.
