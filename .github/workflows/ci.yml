@@ -15,6 +15,29 @@ jobs:
   check:
     name: fmt, clippy, build, test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: savez
+          POSTGRES_PASSWORD: savez
+          POSTGRES_DB: savez
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U savez -d savez"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Both are needed and intentionally coexist: SQLX_OFFLINE forces every `query!`/`query_as!`
+      # macro to read the committed .sqlx/ cache instead of the live service (so a stale cache
+      # fails loudly rather than silently building against a schema the cache disagrees with —
+      # see the "Check sqlx offline cache is current" step below), while DATABASE_URL is what
+      # #[sqlx::test] uses at *runtime* to create its throwaway per-test databases. Do not remove
+      # SQLX_OFFLINE under the assumption that DATABASE_URL alone is sufficient.
+      DATABASE_URL: postgres://savez:savez@localhost:5432/savez
+      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -25,6 +48,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features rustls,postgres --locked
+      - name: Check sqlx offline cache is current
+        run: cargo sqlx prepare --check -- --all-targets --all-features
       - name: Build
         run: cargo build --all-targets --verbose
       - name: Test
