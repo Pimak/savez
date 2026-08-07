@@ -249,3 +249,170 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         .unwrap();
     assert_eq!(not_found_response.status(), StatusCode::NOT_FOUND);
 }
+
+async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value {
+    let body = json!({
+        "title": title,
+        "shortKey": short_key,
+        "data": sample_game_data(),
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    body_to_json(response).await
+}
+
+/// D-04: `new` is the only real category. Two puzzles submitted successively must both come back,
+/// most-recently-submitted first (`created_at DESC, id DESC`), each attributed to the seed author.
+#[sqlx::test]
+async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    submit_puzzle(app.clone(), "list-new-first", "First Puzzle").await;
+    submit_puzzle(app.clone(), "list-new-second", "Second Puzzle").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("list/new returns a JSON array");
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["shortKey"], "list-new-second");
+    assert_eq!(list[1]["shortKey"], "list-new-first");
+    assert_eq!(list[0]["author"], "dev-seed-author");
+    assert_eq!(list[1]["author"], "dev-seed-author");
+}
+
+/// D-05: `top-rated` and `mine` always answer 200 with an empty array, never an error and never a
+/// copy of `new`'s content, even once puzzles exist.
+#[sqlx::test]
+async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    submit_puzzle(app.clone(), "list-empty-1", "Some Puzzle").await;
+
+    for category in ["top-rated", "mine"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/puzzles/list/{category}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "category={category}");
+        let body = body_to_json(response).await;
+        assert_eq!(
+            body,
+            json!([]),
+            "category={category} must return an empty array"
+        );
+    }
+}
+
+/// D-06/D-07: downloading a puzzle never increments `downloads` and never flips `completed`.
+#[sqlx::test]
+async fn download_does_not_increment_counter(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    submit_puzzle(app.clone(), "download-counter-1", "Counter Puzzle").await;
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/puzzles/download/download-counter-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("list/new returns a JSON array");
+    let entry = list
+        .iter()
+        .find(|p| p["shortKey"] == "download-counter-1")
+        .expect("submitted puzzle present in list/new");
+    assert_eq!(entry["downloads"], 0);
+    assert_eq!(entry["completed"], false);
+
+    let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
+        .bind("download-counter-1")
+        .fetch_one(&pool)
+        .await
+        .expect("puzzle row must exist");
+    assert_eq!(downloads, 0);
+}
+
+/// Pitfall 1 lock-in: Postgres has no unsigned integer type, so `likes`/`downloads`/`completions`
+/// are stored `i32` and cast to `u32` on the way out. This proves non-zero values round-trip
+/// intact through that cast rather than silently wrapping or truncating.
+#[sqlx::test]
+async fn counters_round_trip_as_u32(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    submit_puzzle(app.clone(), "counters-roundtrip-1", "Roundtrip Puzzle").await;
+
+    sqlx::query("UPDATE puzzles SET likes = $1, downloads = $2, completions = $3 WHERE short_key = $4")
+        .bind(42_i32)
+        .bind(7_i32)
+        .bind(3_i32)
+        .bind("counters-roundtrip-1")
+        .execute(&pool)
+        .await
+        .expect("counter update must succeed");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/new")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("list/new returns a JSON array");
+    let entry = list
+        .iter()
+        .find(|p| p["shortKey"] == "counters-roundtrip-1")
+        .expect("submitted puzzle present in list/new");
+    assert_eq!(entry["likes"], 42);
+    assert_eq!(entry["downloads"], 7);
+    assert_eq!(entry["completions"], 3);
+}
