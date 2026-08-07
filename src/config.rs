@@ -54,7 +54,7 @@ mod tests {
 
     fn full_map() -> HashMap<&'static str, &'static str> {
         HashMap::from([
-            ("DATABASE_URL", "sqlite://test.db"),
+            ("DATABASE_URL", "postgres://savez:savez@localhost:5432/savez"),
             ("JWT_KEY", "test-key"),
             ("OFFICIAL_API_URL", "https://api.shapez.io"),
             ("PORT", "15001"),
@@ -74,7 +74,10 @@ mod tests {
     fn all_vars_present_returns_ok_with_matching_values() {
         let map = full_map();
         let config = Config::from_lookup(lookup_from(&map)).unwrap();
-        assert_eq!(config.database_url, "sqlite://test.db");
+        assert_eq!(
+            config.database_url,
+            "postgres://savez:savez@localhost:5432/savez"
+        );
         assert_eq!(config.jwt_key, "test-key");
         assert_eq!(config.official_api_url, "https://api.shapez.io");
         assert_eq!(config.port, 15001);
