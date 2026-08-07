@@ -4,7 +4,7 @@ use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod config;
-mod routes;
+pub mod routes;
 
 pub fn app() -> Router {
     let cors = CorsLayer::new()
