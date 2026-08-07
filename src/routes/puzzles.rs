@@ -23,8 +23,23 @@ pub struct PuzzleMetadata {
     pub completed: bool,
 }
 
-pub async fn list_new() -> Json<Vec<PuzzleMetadata>> {
-    Json(vec![]) // hardcoded content per REQ-http-skeleton; real data arrives in Phase 3
+/// `GET /v1/puzzles/list/{category}`. Only `new` is backed by a real query (D-04): it reflects
+/// the actual submitted puzzles, newest first. `top-rated` and `mine` return `200 []` rather than
+/// an error or a copy of `new` (D-05) — ranking by likes arrives in Phase 7, and `mine` needs a
+/// current user that doesn't exist before Phase 5. Any other category value also falls back to an
+/// empty array in 200, per the project's all-200 convention (DEC-api-contract-conventions): an
+/// unknown category is never a 404.
+pub async fn list(
+    State(state): State<AppState>,
+    Path(category): Path<String>,
+) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
+    match category.as_str() {
+        "new" => Ok(Json(repository::list_new(&state.pool).await?)),
+        // D-05: top-rated (sort by likes) and mine (current-user scope) are not implementable
+        // before Phase 7/Phase 5 respectively; an empty list is the contractually-correct
+        // placeholder, never an error and never `new`'s content.
+        _ => Ok(Json(Vec::new())),
+    }
 }
 
 /// `x`/`y`/`r` in the JS typedef (`savegame_typedefs.js`) are only annotated `number`. Treated as

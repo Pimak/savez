@@ -388,14 +388,16 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
 
     submit_puzzle(app.clone(), "counters-roundtrip-1", "Roundtrip Puzzle").await;
 
-    sqlx::query("UPDATE puzzles SET likes = $1, downloads = $2, completions = $3 WHERE short_key = $4")
-        .bind(42_i32)
-        .bind(7_i32)
-        .bind(3_i32)
-        .bind("counters-roundtrip-1")
-        .execute(&pool)
-        .await
-        .expect("counter update must succeed");
+    sqlx::query(
+        "UPDATE puzzles SET likes = $1, downloads = $2, completions = $3 WHERE short_key = $4",
+    )
+    .bind(42_i32)
+    .bind(7_i32)
+    .bind(3_i32)
+    .bind("counters-roundtrip-1")
+    .execute(&pool)
+    .await
+    .expect("counter update must succeed");
 
     let response = app
         .oneshot(

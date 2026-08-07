@@ -21,7 +21,7 @@ pub fn app(state: db::AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(routes::health::healthz))
-        .route("/v1/puzzles/list/new", get(routes::puzzles::list_new))
+        .route("/v1/puzzles/list/{category}", get(routes::puzzles::list))
         .route("/v1/puzzles/submit", post(routes::puzzles::submit))
         .route(
             "/v1/puzzles/download/{id_or_key}",
