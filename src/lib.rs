@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::http::{Method, header};
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod config;
@@ -22,6 +22,11 @@ pub fn app(state: db::AppState) -> Router {
     Router::new()
         .route("/healthz", get(routes::health::healthz))
         .route("/v1/puzzles/list/new", get(routes::puzzles::list_new))
+        .route("/v1/puzzles/submit", post(routes::puzzles::submit))
+        .route(
+            "/v1/puzzles/download/{id_or_key}",
+            get(routes::puzzles::download),
+        )
         .layer(cors)
         .with_state(state)
 }
