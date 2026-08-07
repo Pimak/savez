@@ -1,5 +1,10 @@
 use axum::Json;
+use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+
+use crate::db::AppState;
+use crate::error::AppError;
+use crate::repository;
 
 /// Field names/casing verified byte-for-byte against `tobspr-games/shapez.io`'s
 /// `src/js/savegame/savegame_typedefs.js`.
@@ -83,4 +88,36 @@ pub struct SubmitPuzzleRequest {
     pub title: String,
     pub short_key: String,
     pub data: PuzzleGameData,
+}
+
+// TODO(Phase 6): the exact submission response shape (and the `T.backendErrors` error codes) is
+// part of the full ClientAPI contract (DEC-api-contract-conventions), delivered in Phase 6
+// (REQ-shapez-contract-complete). In Phase 3 the created `PuzzleMetadata` is returned as-is.
+//
+// `payload` never carries an author: `SubmitPuzzleRequest` has no author-shaped field, and serde
+// silently drops unknown JSON keys, so a client-supplied `author`/`authorId` is structurally
+// without effect (T-03-21) — `repository::insert_puzzle` always writes `DEV_SEED_AUTHOR_ID`.
+pub async fn submit(
+    State(state): State<AppState>,
+    Json(payload): Json<SubmitPuzzleRequest>,
+) -> Result<Json<PuzzleMetadata>, AppError> {
+    let id = repository::insert_puzzle(&state.pool, &payload).await?;
+    let full = repository::find_puzzle_by_id(&state.pool, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(full.meta))
+}
+
+/// Resolves `id_or_key` as a numeric `id` first, falling back to a `short_key` lookup when it
+/// doesn't parse as `i32`. Does NOT increment `downloads` (D-06) nor compute `completed` (D-07,
+/// stays `false` — no current user exists before Phase 5).
+pub async fn download(
+    State(state): State<AppState>,
+    Path(id_or_key): Path<String>,
+) -> Result<Json<PuzzleFullData>, AppError> {
+    let full = match id_or_key.parse::<i32>() {
+        Ok(id) => repository::find_puzzle_by_id(&state.pool, id).await?,
+        Err(_) => repository::find_puzzle_by_short_key(&state.pool, &id_or_key).await?,
+    };
+    full.map(Json).ok_or(AppError::NotFound)
 }

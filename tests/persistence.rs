@@ -203,7 +203,9 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         .unwrap();
     assert_eq!(submit_response.status(), StatusCode::OK);
     let submitted_meta = body_to_json(submit_response).await;
-    let id = submitted_meta["id"].as_u64().expect("submitted id is a number");
+    let id = submitted_meta["id"]
+        .as_u64()
+        .expect("submitted id is a number");
 
     let by_id_response = app
         .clone()
