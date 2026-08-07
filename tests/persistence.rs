@@ -1,5 +1,11 @@
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use http_body_util::BodyExt;
+use savez::db::AppState;
 use savez::routes::puzzles::{Bounds, Pos, PuzzleGameBuilding, PuzzleGameData};
+use serde_json::{Value, json};
 use sqlx::PgPool;
+use tower::ServiceExt; // for `oneshot`
 
 /// Proves `PuzzleGameData` (and its nested types) serialize with exactly the field names/casing
 /// of `savegame_typedefs.js`'s `PuzzleGameData` typedef, and that the JSON round-trips losslessly
@@ -106,4 +112,138 @@ async fn migrations_create_all_tables(pool: PgPool) {
         seed_row,
         ("dev-seed-author".to_string(), "dev-seed".to_string())
     );
+}
+
+fn sample_game_data() -> Value {
+    json!({
+        "version": 1,
+        "bounds": { "w": 10, "h": 8 },
+        "buildings": [
+            { "type": "emitter", "item": "shape:CuCuCuCu", "pos": { "x": 0, "y": 0, "r": 0 } },
+            { "type": "goal", "item": "shape:CuCuCuCu", "pos": { "x": 5, "y": 5, "r": 90 } },
+            { "type": "block", "pos": { "x": 2, "y": 2, "r": 180 } },
+        ],
+        "excludedBuildings": ["CutterMirrored"],
+    })
+}
+
+async fn body_to_json(response: axum::response::Response) -> Value {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect response body")
+        .to_bytes();
+    serde_json::from_slice(&bytes).expect("response body is valid JSON")
+}
+
+/// T-03-21 mitigation proof: a submission body carrying client-supplied `author`/`authorId`
+/// fields is accepted, but the row that lands in the database is always attributed to the
+/// D-02 seed author — never to the values the client sent.
+#[sqlx::test]
+async fn submit_persists_puzzle(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    let body = json!({
+        "title": "Test Puzzle",
+        "shortKey": "submit-persists-1",
+        "data": sample_game_data(),
+        "author": "attaquant",
+        "authorId": "11111111-1111-1111-1111-111111111111",
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let row: (String, String) =
+        sqlx::query_as("SELECT title, author_id::text FROM puzzles WHERE short_key = $1")
+            .bind("submit-persists-1")
+            .fetch_one(&pool)
+            .await
+            .expect("submitted puzzle row must exist");
+    assert_eq!(row.0, "Test Puzzle");
+    assert_eq!(row.1, "00000000-0000-0000-0000-000000000001");
+}
+
+/// A puzzle downloads identically by numeric `id` and by `shortKey`, in the `{ meta, game }`
+/// shape, and an unknown id resolves to 404.
+#[sqlx::test]
+async fn download_by_id_and_by_short_key(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    let submit_body = json!({
+        "title": "Download Test Puzzle",
+        "shortKey": "download-both-1",
+        "data": sample_game_data(),
+    });
+
+    let submit_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(submit_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit_response.status(), StatusCode::OK);
+    let submitted_meta = body_to_json(submit_response).await;
+    let id = submitted_meta["id"].as_u64().expect("submitted id is a number");
+
+    let by_id_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_id_response.status(), StatusCode::OK);
+    let by_id_body = body_to_json(by_id_response).await;
+
+    let by_short_key_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/download-both-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_short_key_response.status(), StatusCode::OK);
+    let by_short_key_body = body_to_json(by_short_key_response).await;
+
+    assert_eq!(by_id_body, by_short_key_body);
+    assert!(by_id_body.get("meta").is_some());
+    assert!(by_id_body.get("game").is_some());
+    assert_eq!(by_id_body["game"], sample_game_data());
+
+    let not_found_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/999999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(not_found_response.status(), StatusCode::NOT_FOUND);
 }
