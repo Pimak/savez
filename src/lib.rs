@@ -5,6 +5,8 @@ use tower_http::cors::{Any, CorsLayer};
 
 pub mod config;
 pub mod db;
+pub mod error;
+pub mod repository;
 pub mod routes;
 
 pub fn app(state: db::AppState) -> Router {

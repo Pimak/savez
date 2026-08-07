@@ -25,7 +25,7 @@ pub async fn list_new() -> Json<Vec<PuzzleMetadata>> {
 /// `x`/`y`/`r` in the JS typedef (`savegame_typedefs.js`) are only annotated `number`. Treated as
 /// `i32` here: grid coordinates and building rotation are integral in shapez's placement model
 /// (RESEARCH.md Assumptions Log A1).
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Pos {
     pub x: i32,
@@ -33,7 +33,7 @@ pub struct Pos {
     pub r: i32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Bounds {
     pub w: u32,
@@ -43,7 +43,7 @@ pub struct Bounds {
 /// Internally-tagged enum mirroring the JS discriminated union
 /// (`PuzzleGameBuildingConstantProducer | PuzzleGameBuildingGoal | PuzzleGameBuildingBlock`)
 /// exactly: `type` carries the discriminant, `item` is present on `emitter`/`goal` only.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PuzzleGameBuilding {
     Emitter { item: String, pos: Pos },
@@ -51,7 +51,12 @@ pub enum PuzzleGameBuilding {
     Block { pos: Pos },
 }
 
-#[derive(Serialize, Deserialize)]
+// `Debug` is required by `sqlx::query!`'s generated row struct wherever `PuzzleGameData` is
+// bound as a `Json<PuzzleGameData>` column (see `src/repository.rs::find_puzzle_by_id` /
+// `find_puzzle_by_short_key`) — sqlx 0.9's macro-generated row types unconditionally derive
+// `Debug`, which requires every field type (transitively: `Bounds`, `Pos`, `PuzzleGameBuilding`)
+// to implement it too.
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PuzzleGameData {
     pub version: u32,
