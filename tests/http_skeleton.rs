@@ -1,11 +1,13 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use savez::app;
+use savez::db::AppState;
+use sqlx::PgPool;
 use tower::ServiceExt; // for `oneshot`
 
-#[tokio::test]
-async fn healthz_returns_200() {
-    let response = app()
+#[sqlx::test]
+async fn healthz_returns_200(pool: PgPool) {
+    let state = AppState { pool };
+    let response = savez::app(state)
         .oneshot(
             Request::builder()
                 .uri("/healthz")
@@ -17,9 +19,10 @@ async fn healthz_returns_200() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn list_new_returns_200_json_array() {
-    let response = app()
+#[sqlx::test]
+async fn list_new_returns_200_json_array(pool: PgPool) {
+    let state = AppState { pool };
+    let response = savez::app(state)
         .oneshot(
             Request::builder()
                 .uri("/v1/puzzles/list/new")
@@ -35,9 +38,10 @@ async fn list_new_returns_200_json_array() {
     );
 }
 
-#[tokio::test]
-async fn cors_preflight_allows_expected_headers() {
-    let response = app()
+#[sqlx::test]
+async fn cors_preflight_allows_expected_headers(pool: PgPool) {
+    let state = AppState { pool };
+    let response = savez::app(state)
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
