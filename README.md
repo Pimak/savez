@@ -2,6 +2,7 @@
 
 Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with a preservation goal.
 
+> [!IMPORTANT]
 > **Status: Draft.** The entire project is conditioned on tobspr's agreement, requested by email on August 6, 2026, on three principles: ownership validation via the official API, export by creators of their own puzzles only, and future cooperation on catalog preservation. Development continues while awaiting a response; scope may be revised depending on the outcome of that exchange.
 
 ## Goals
