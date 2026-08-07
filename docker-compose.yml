@@ -1,0 +1,22 @@
+# No top-level `version:` key — obsolete in Compose Specification v2+, emits a deprecation warning.
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: savez
+      POSTGRES_PASSWORD: savez
+      POSTGRES_DB: savez
+    ports:
+      - "5432:5432" # dev-only convenience (psql, GUI tools); not published in production (Phase 8)
+    volumes:
+      # parent dir, not …/data — postgres:18 moved PGDATA to a versioned subpath
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U savez -d savez"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
