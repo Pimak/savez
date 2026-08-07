@@ -1,4 +1,5 @@
 use savez::routes::puzzles::{Bounds, Pos, PuzzleGameBuilding, PuzzleGameData};
+use sqlx::PgPool;
 
 /// Proves `PuzzleGameData` (and its nested types) serialize with exactly the field names/casing
 /// of `savegame_typedefs.js`'s `PuzzleGameData` typedef, and that the JSON round-trips losslessly
@@ -65,4 +66,44 @@ fn puzzle_game_data_field_names_match_typedefs() {
         serde_json::from_value(value.clone()).expect("deserialize PuzzleGameData");
     let round_tripped_value = serde_json::to_value(&round_tripped).expect("re-serialize");
     assert_eq!(value, round_tripped_value);
+}
+
+/// `#[sqlx::test]` creates a fresh, throwaway Postgres database and applies every migration in
+/// `migrations/` to it before this test body runs — proving the migrations produce the full
+/// 6-table SPEC §4.3 schema plus the D-02 dev-seed-author row, without any manual setup here.
+#[sqlx::test]
+async fn migrations_create_all_tables(pool: PgPool) {
+    let expected_tables = [
+        "users",
+        "puzzles",
+        "puzzle_completions",
+        "puzzle_reports",
+        "user_bans",
+        "moderation_log",
+    ];
+
+    for table in expected_tables {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = $1
+            )",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|err| panic!("querying information_schema for {table} failed: {err}"));
+        assert!(exists, "expected table `{table}` to exist in public schema");
+    }
+
+    let seed_row: (String, String) = sqlx::query_as(
+        "SELECT name, verified_via FROM users WHERE id = '00000000-0000-0000-0000-000000000001'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("D-02 seed row must exist after migrations run");
+    assert_eq!(
+        seed_row,
+        ("dev-seed-author".to_string(), "dev-seed".to_string())
+    );
 }
