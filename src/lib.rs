@@ -4,9 +4,10 @@ use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod config;
+pub mod db;
 pub mod routes;
 
-pub fn app() -> Router {
+pub fn app(state: db::AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST])
@@ -20,4 +21,5 @@ pub fn app() -> Router {
         .route("/healthz", get(routes::health::healthz))
         .route("/v1/puzzles/list/new", get(routes::puzzles::list_new))
         .layer(cors)
+        .with_state(state)
 }
