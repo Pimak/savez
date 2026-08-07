@@ -8,7 +8,9 @@ services:
       POSTGRES_PASSWORD: savez
       POSTGRES_DB: savez
     ports:
-      - "5432:5432" # dev-only convenience (psql, GUI tools); not published in production (Phase 8)
+      - "5433:5432" # host port 5433: 5432 is taken by a native Windows PostgreSQL service on this
+                     # machine (scoop-installed, unrelated to this project); container-internal port
+                     # stays 5432. Dev-only convenience (psql, GUI tools); not published in production (Phase 8)
     volumes:
       # parent dir, not …/data — postgres:18 moved PGDATA to a versioned subpath
       - pgdata:/var/lib/postgresql
