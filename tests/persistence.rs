@@ -77,7 +77,8 @@ fn puzzle_game_data_field_names_match_typedefs() {
 
 /// `#[sqlx::test]` creates a fresh, throwaway Postgres database and applies every migration in
 /// `migrations/` to it before this test body runs — proving the migrations produce the full
-/// 6-table SPEC §4.3 schema plus the D-02 dev-seed-author row, without any manual setup here.
+/// 6-table SPEC §4.3 schema plus the D-02 seed author row (see the assertion below for its exact
+/// `name`/`verified_via` values), without any manual setup here.
 #[sqlx::test]
 async fn migrations_create_all_tables(pool: PgPool) {
     let expected_tables = [
@@ -138,13 +139,16 @@ async fn body_to_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("response body is valid JSON")
 }
 
-/// T-03-21 mitigation proof: a submission body carrying client-supplied `author`/`authorId`
-/// fields is accepted, but the row that lands in the database is always attributed to the
-/// D-02 seed author — never to the values the client sent.
+/// T-03-21/T-05-05 mitigation proof: a submission body carrying client-supplied `author`/
+/// `authorId` fields is accepted, but the row that lands in the database is always attributed to
+/// the JWT-authenticated user — never to the values the client sent.
 #[sqlx::test]
 async fn submit_persists_puzzle(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
 
     let body = json!({
         "title": "Test Puzzle",
@@ -160,6 +164,7 @@ async fn submit_persists_puzzle(pool: PgPool) {
                 .method("POST")
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -174,7 +179,7 @@ async fn submit_persists_puzzle(pool: PgPool) {
             .await
             .expect("submitted puzzle row must exist");
     assert_eq!(row.0, "Test Puzzle");
-    assert_eq!(row.1, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(row.1, author_id.to_string());
 }
 
 /// A puzzle downloads identically by numeric `id` and by `shortKey`, in the `{ meta, game }`
@@ -183,6 +188,9 @@ async fn submit_persists_puzzle(pool: PgPool) {
 async fn download_by_id_and_by_short_key(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
 
     let submit_body = json!({
         "title": "Download Test Puzzle",
@@ -197,6 +205,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
                 .method("POST")
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
                 .body(Body::from(submit_body.to_string()))
                 .unwrap(),
         )
@@ -259,13 +268,16 @@ async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) 
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
+
     // First puzzle: whatever numeric `id` the DB assigns it (e.g. 1).
-    let decoy = submit_puzzle(app.clone(), "decoy-puzzle", "Decoy").await;
+    let decoy = submit_puzzle(app.clone(), &token, "decoy-puzzle", "Decoy").await;
     let decoy_id = decoy["id"].as_u64().expect("decoy id is a number");
 
     // Second puzzle: its `short_key` is literally the decoy's numeric id as a string.
     let numeric_key = decoy_id.to_string();
-    let target = submit_puzzle(app.clone(), &numeric_key, "Numeric ShortKey Puzzle").await;
+    let target = submit_puzzle(app.clone(), &token, &numeric_key, "Numeric ShortKey Puzzle").await;
     let target_id = target["id"].as_u64().expect("target id is a number");
     assert_ne!(
         decoy_id, target_id,
@@ -293,7 +305,7 @@ async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) 
     assert_eq!(body["meta"]["shortKey"], numeric_key);
 }
 
-async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value {
+async fn submit_puzzle(app: axum::Router, token: &str, short_key: &str, title: &str) -> Value {
     let body = json!({
         "title": title,
         "shortKey": short_key,
@@ -305,6 +317,7 @@ async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value
                 .method("POST")
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", token)
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -315,14 +328,18 @@ async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value
 }
 
 /// D-04: `new` is the only real category. Two puzzles submitted successively must both come back,
-/// most-recently-submitted first (`created_at DESC, id DESC`), each attributed to the seed author.
+/// most-recently-submitted first (`created_at DESC, id DESC`), each attributed to the
+/// JWT-authenticated `test-author` user.
 #[sqlx::test]
 async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    submit_puzzle(app.clone(), "list-new-first", "First Puzzle").await;
-    submit_puzzle(app.clone(), "list-new-second", "Second Puzzle").await;
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(app.clone(), &token, "list-new-first", "First Puzzle").await;
+    submit_puzzle(app.clone(), &token, "list-new-second", "Second Puzzle").await;
 
     let response = app
         .oneshot(
@@ -339,8 +356,8 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["shortKey"], "list-new-second");
     assert_eq!(list[1]["shortKey"], "list-new-first");
-    assert_eq!(list[0]["author"], "dev-seed-author");
-    assert_eq!(list[1]["author"], "dev-seed-author");
+    assert_eq!(list[0]["author"], "test-author");
+    assert_eq!(list[1]["author"], "test-author");
 }
 
 /// D-05: `top-rated` and `mine` always answer 200 with an empty array, never an error and never a
@@ -350,7 +367,10 @@ async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    submit_puzzle(app.clone(), "list-empty-1", "Some Puzzle").await;
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(app.clone(), &token, "list-empty-1", "Some Puzzle").await;
 
     for category in ["top-rated", "mine"] {
         let response = app
@@ -379,7 +399,10 @@ async fn download_does_not_increment_counter(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    submit_puzzle(app.clone(), "download-counter-1", "Counter Puzzle").await;
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(app.clone(), &token, "download-counter-1", "Counter Puzzle").await;
 
     for _ in 0..2 {
         let response = app
@@ -429,6 +452,9 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
+
     let body = json!({
         "title": "Undecodable Puzzle",
         "shortKey": "undecodable-1",
@@ -441,6 +467,7 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
                 .method("POST")
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -467,7 +494,16 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    submit_puzzle(app.clone(), "counters-roundtrip-1", "Roundtrip Puzzle").await;
+    let author_id = common::register_test_user(&pool, "test-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(
+        app.clone(),
+        &token,
+        "counters-roundtrip-1",
+        "Roundtrip Puzzle",
+    )
+    .await;
 
     sqlx::query(
         "UPDATE puzzles SET likes = $1, downloads = $2, completions = $3 WHERE short_key = $4",
