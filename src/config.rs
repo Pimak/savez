@@ -4,6 +4,21 @@ pub enum ConfigError {
     MissingVar(&'static str),
     #[error("invalid value for PORT: {0:?}")]
     InvalidPort(String),
+    #[error("invalid value for AUTH_MODE: {0:?}")]
+    InvalidAuthMode(String),
+}
+
+/// Phase 2 authentication switch (ROADMAP SC4). `Oracle` is the only functional mode in v1;
+/// `Open`/`SteamOpenId` exist in configuration only — wiring their actual behavior is deferred
+/// until the official service closes (see AppError::AuthModeNotImplemented).
+///
+/// Unlike `Config`, this enum carries no secret and MUST derive `Debug`: the startup log line
+/// (plan 05-02) needs to print the active mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    Oracle,
+    Open,
+    SteamOpenId,
 }
 
 pub struct Config {
@@ -11,6 +26,7 @@ pub struct Config {
     pub jwt_key: String,
     pub official_api_url: String,
     pub port: u16,
+    pub auth_mode: AuthMode,
 }
 
 impl Config {
@@ -28,12 +44,26 @@ impl Config {
                 .map_err(|_| ConfigError::InvalidPort(value))?,
             None => 15001,
         };
+        // Optional-with-default, like `port` above — never `ok_or(MissingVar)?` — the switch is
+        // inert by default and most deployments will not set it. An unrecognized value is still
+        // fail-fast (never silently falls back to Oracle): a misspelled AUTH_MODE in production
+        // must be loud, not silently ignored.
+        let auth_mode = match lookup("AUTH_MODE") {
+            Some(value) => match value.as_str() {
+                "oracle" => AuthMode::Oracle,
+                "open" => AuthMode::Open,
+                "steam-openid" => AuthMode::SteamOpenId,
+                _ => return Err(ConfigError::InvalidAuthMode(value)),
+            },
+            None => AuthMode::Oracle,
+        };
 
         Ok(Config {
             database_url,
             jwt_key,
             official_api_url,
             port,
+            auth_mode,
         })
     }
 
