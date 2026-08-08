@@ -5,15 +5,16 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::routes::puzzles::{PuzzleFullData, PuzzleGameData, PuzzleMetadata, SubmitPuzzleRequest};
 
-// TODO(Phase 5): retirer dès que l'auth JWT fournit un author_id réel — voir
-// migrations/20260807000002_seed_dev_author.sql, dont la ligne seed porte cet UUID littéral.
-// Les deux valeurs doivent rester identiques byte-for-byte.
-pub const DEV_SEED_AUTHOR_ID: Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
-
-/// Inserts a new puzzle row. `author_id` is ALWAYS `DEV_SEED_AUTHOR_ID` — never a value taken
-/// from `req` (there is none to take: `SubmitPuzzleRequest` has no author-shaped field, and even
-/// if it did this function would still ignore it, per D-01/D-02).
-pub async fn insert_puzzle(pool: &PgPool, req: &SubmitPuzzleRequest) -> Result<i32, AppError> {
+/// Inserts a new puzzle row. `author_id` ALWAYS comes from the caller-supplied, server-verified
+/// JWT (`AuthUser.user_id` in `routes::puzzles::submit`) — never from `req` (there is none to
+/// take: `SubmitPuzzleRequest` has no author-shaped field, and even if it did this function would
+/// still ignore it, per D-01/D-02). Adding an author-shaped field to `SubmitPuzzleRequest` would
+/// be a regression of T-03-21/T-05-05: the server, not the client, always determines authorship.
+pub async fn insert_puzzle(
+    pool: &PgPool,
+    req: &SubmitPuzzleRequest,
+    author_id: Uuid,
+) -> Result<i32, AppError> {
     let row = sqlx::query!(
         r#"
         INSERT INTO puzzles (short_key, title, author_id, data)
@@ -22,7 +23,7 @@ pub async fn insert_puzzle(pool: &PgPool, req: &SubmitPuzzleRequest) -> Result<i
         "#,
         req.short_key,
         req.title,
-        DEV_SEED_AUTHOR_ID,
+        author_id,
         Json(&req.data) as Json<&PuzzleGameData>,
     )
     .fetch_one(pool)

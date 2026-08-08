@@ -95,10 +95,9 @@ pub struct PuzzleFullData {
 
 /// Internal type constructed AFTER `decode_puzzle_data` succeeds (D-08) — no longer the wire body
 /// of `POST /v1/puzzles/submit` (see `SubmitPuzzlePayload` for that). Deliberately has NO
-/// `author`/`authorId` field: the author is always the server-side seeded dev user in Phase 3
-/// (D-02) and will be the JWT-authenticated user from Phase 5 onward — never a client-supplied
-/// value (threat T-03-11). Do not add an author-shaped field here "for convenience"; the server
-/// always determines authorship itself.
+/// `author`/`authorId` field: the author is always the JWT-authenticated user (`AuthUser.user_id`,
+/// Phase 5) — never a client-supplied value (threat T-03-11/T-05-05). Do not add an author-shaped
+/// field here "for convenience"; the server always determines authorship itself.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitPuzzleRequest {
@@ -188,11 +187,13 @@ fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
 // part of the full ClientAPI contract (DEC-api-contract-conventions), delivered in Phase 6
 // (REQ-shapez-contract-complete). In Phase 3 the created `PuzzleMetadata` is returned as-is.
 //
-// `payload` never carries an author: `SubmitPuzzleRequest` has no author-shaped field, and serde
-// silently drops unknown JSON keys, so a client-supplied `author`/`authorId` is structurally
-// without effect (T-03-21) — `repository::insert_puzzle` always writes `DEV_SEED_AUTHOR_ID`.
+// `payload` never carries an effective author: `SubmitPuzzleRequest` has no author-shaped field,
+// and serde silently drops unknown JSON keys, so a client-supplied `author`/`authorId` is
+// structurally without effect (T-03-21/T-05-05) — the author is always `auth.user_id`, taken from
+// the server-verified JWT injected by the `AuthUser` extractor, never anything the client sends.
 pub async fn submit(
     State(state): State<AppState>,
+    auth: crate::auth::extractor::AuthUser,
     Json(payload): Json<SubmitPuzzlePayload>,
 ) -> Result<Json<PuzzleMetadata>, AppError> {
     let data = decode_puzzle_data(&payload.data)?;
@@ -201,7 +202,7 @@ pub async fn submit(
         short_key: payload.short_key,
         data,
     };
-    let id = repository::insert_puzzle(&state.pool, &request).await?;
+    let id = repository::insert_puzzle(&state.pool, &request, auth.user_id).await?;
     let full = repository::find_puzzle_by_id(&state.pool, id)
         .await?
         .ok_or(AppError::NotFound)?;
