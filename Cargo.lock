@@ -1791,6 +1791,7 @@ dependencies = [
  "jsonwebtoken",
  "lz-str",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",

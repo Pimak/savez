@@ -28,12 +28,23 @@ async fn connect_with_retry(database_url: &str) -> Result<sqlx::PgPool, sqlx::Er
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    // `reqwest` is built with the `rustls-no-provider` feature (05-01 decision: avoids pulling in
+    // the aws-lc-sys/cmake C build dependency) which does NOT install a default rustls
+    // `CryptoProvider` automatically. `ring` is already in the dependency tree via sqlx's
+    // `tls-rustls-ring-webpki` feature, so installing it here adds no new crypto backend — but
+    // without this call, the first real TLS handshake made by `build_http_client()`'s client would
+    // panic with "no process-level CryptoProvider available." Must run before any HTTPS request.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring crypto provider");
+
     // Local dev convenience only; production loads env vars via systemd `EnvironmentFile=`
     // (DEC-deployment-architecture). Silently no-ops if `.env` doesn't exist.
     dotenvy::dotenv().ok();
 
     let config = savez::config::Config::from_env().expect("invalid configuration");
     tracing::info!(port = config.port, "starting savez");
+    tracing::info!(auth_mode = ?config.auth_mode, "auth mode");
 
     let pool = connect_with_retry(&config.database_url)
         .await
@@ -45,7 +56,14 @@ async fn main() {
         .expect("migrations failed");
     tracing::info!("migrations applied");
 
-    let state = savez::db::AppState { pool };
+    let http_client = savez::db::build_http_client().expect("reqwest client build");
+    let state = savez::db::AppState {
+        pool,
+        jwt_key: config.jwt_key,
+        official_api_url: config.official_api_url,
+        auth_mode: config.auth_mode,
+        http_client,
+    };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], config.port));
     let listener = tokio::net::TcpListener::bind(addr)

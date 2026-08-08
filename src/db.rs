@@ -5,11 +5,31 @@ use sqlx::postgres::PgPoolOptions;
 
 /// Shared application state threaded through the Axum `Router` via `.with_state()`.
 ///
-/// Does NOT derive `Debug`: nothing that touches a connection pool (or, in future phases, secrets
-/// like a JWT signing key) should be trivially printable — same convention as `Config`.
+/// Does NOT derive `Debug`: `jwt_key` is a secret and must never be trivially printable — same
+/// convention as `Config`. All five fields are cheap to clone: `PgPool` and `reqwest::Client` are
+/// internally `Arc`-backed, and `AuthMode` is `Copy`.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    pub jwt_key: String,
+    pub official_api_url: String,
+    pub auth_mode: crate::config::AuthMode,
+    pub http_client: reqwest::Client,
+}
+
+/// Bound on every outbound HTTP call to the oracle (`api.shapez.io`). The official shapez client
+/// itself wraps each call in a 15s `timeoutPromise` (05-RESEARCH.md Assumptions Log A2); a shorter,
+/// explicit server-side timeout is mandatory regardless — without one, a slow or hung oracle could
+/// leave a login request pending indefinitely (T-05-07).
+pub const ORACLE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Builds the outbound `reqwest::Client` used for oracle verification calls, bounded by
+/// `ORACLE_HTTP_TIMEOUT`. Never panics internally (fail-fast, typed-error discipline mirrored from
+/// `connect`) — `main.rs` is the only place in the binary that `.expect()`s on the result.
+pub fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(ORACLE_HTTP_TIMEOUT)
+        .build()
 }
 
 /// Opens a PostgreSQL connection pool. Never panics internally (fail-fast, typed-error
