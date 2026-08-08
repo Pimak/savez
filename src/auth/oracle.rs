@@ -12,9 +12,6 @@ use crate::error::AppError;
 // sinon le vrai api.shapez.io peut refuser la requête comme provenant d'une application inconnue.
 const CLIENT_API_KEY: &str = "d5c54aaa491f200709afff082c153ef2";
 
-// STUB (RED phase): le corps de la réponse 200 n'est pas encore inspecté — n'importe quel 200
-// est traité comme une preuve de possession, y compris un corps `{"error": ...}`. Corrigé au
-// commit GREEN (défense en profondeur A1, 05-RESEARCH.md).
 /// Unique appel de vérification de possession du DLC (CON-official-api-usage : un seul appel
 /// oracle par inscription). `client` et `official_api_url` sont TOUJOURS des paramètres, jamais
 /// lus depuis un état global — convention `Config::from_lookup`, rend cette fonction testable
@@ -54,8 +51,24 @@ pub async fn verify_official_ownership(
         return Err(AppError::OracleVerificationFailed);
     }
 
-    tracing::info!("oracle verification succeeded");
-    Ok(())
+    // A1 (05-RESEARCH.md): defense in depth. A literal 200 alone is not sufficient proof — the
+    // body must also parse as the documented `PuzzleMetadata[]` success shape (any JSON array).
+    // This is the signal that would prove A1 wrong if the real oracle ever used an all-200
+    // convention for its own errors too (distinct trace vs. the two branches above).
+    match response.json::<serde_json::Value>().await {
+        Ok(body) if body.is_array() => {
+            tracing::info!("oracle verification succeeded");
+            Ok(())
+        }
+        Ok(_) => {
+            tracing::warn!("oracle returned 200 but body is not a JSON array");
+            Err(AppError::OracleVerificationFailed)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "oracle returned 200 but body could not be parsed");
+            Err(AppError::OracleVerificationFailed)
+        }
+    }
 }
 
 #[cfg(test)]
