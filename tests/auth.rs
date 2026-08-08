@@ -404,6 +404,59 @@ async fn login_never_creates_an_admin_role(pool: PgPool) {
     assert_eq!(role, "user");
 }
 
+/// D-08/SC4: no route anywhere in the router creates an administrator. These three paths are
+/// unregistered in `src/lib.rs`'s `Router::new()` — axum's default fallback answers 404 for any
+/// unmatched route, which is itself the proof: there is no public surface to even attempt.
+#[sqlx::test]
+async fn no_public_admin_creation_route(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    for uri in [
+        "/v1/public/admin",
+        "/v1/admin/users",
+        "/v1/public/register-admin",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "uri={uri}");
+    }
+}
+
+/// D-08/T-05-29: the seed migration occupies `name = 'admin'` (see
+/// migrations/20260808000001_seed_first_admin.sql), so `UNIQUE(name)` makes that pseudo
+/// unreachable through the public login/registration path — even with a fully successful oracle
+/// verification, the attempt is refused and no second row is created or merged.
+#[sqlx::test]
+async fn admin_name_is_reserved_by_seed(pool: PgPool) {
+    let server = mock_oracle_ok(1).await;
+    let state = common::test_state_with_oracle(pool.clone(), &server.uri());
+    let app = savez::app(state);
+
+    let response = post_login(app, "valid-token", "admin").await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE name = $1")
+        .bind("admin")
+        .fetch_one(&pool)
+        .await
+        .expect("count query");
+    assert_eq!(
+        count, 1,
+        "only the seed row must exist for name='admin', never a second one"
+    );
+}
+
 #[sqlx::test]
 async fn non_oracle_auth_mode_returns_not_implemented(pool: PgPool) {
     let server = mock_oracle_ok(0).await;
