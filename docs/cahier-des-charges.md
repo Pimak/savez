@@ -101,6 +101,8 @@ Cf. `src/js/savegame/savegame_typedefs.js` :
 
 **Validation à la soumission** (reprendre les règles observables dans les codes d'erreur du client) : au moins un émetteur et un objectif, clés de forme valides, shortKey unique et bien formé, titre non profane / longueur correcte, placements valides dans les bounds.
 
+**Double format de `data` à la soumission.** Comparaison directe des deux `ClientAPI` réels (2026-08-08, `src/js/platform/api.js`) : le client officiel compresse `data` en lz-string avant envoi (`compressX64(JSON.stringify(payload.data))`), tandis que la Community Edition envoie du JSON brut non compressé — un bug assumé côté CE, signalé par son propre commentaire `// FIXME: Server expects lzstring compressed payload`. Ce ne sont pas deux modes exclusifs à choisir au déploiement : les deux clients coexistent en usage réel, donc `/v1/puzzles/submit` doit **détecter le format automatiquement** (tentative de `JSON.parse` direct, puis décompression `lz-str`/`compressX64` en repli) plutôt que d'en supposer un seul. Aucune divergence en sens inverse : ni l'un ni l'autre client ne décompresse quoi que ce soit à la lecture, donc `GET /v1/puzzles/download/*` continue de servir `game` décompressé sans changement (cf. 4.3, « Décision »).
+
 ### 4.3 Modèle de données
 
 Transposition du schéma Prisma de gatez-backend, épuré des champs logic-gates (`minimumComponents`, `minimumNands`…), enrichi pour la double authentification :
@@ -193,7 +195,8 @@ Toute action de modération écrit une entrée dans `moderation_log` (qui, quoi,
 ## 5. Spécifications du mod
 
 - **Nature :** mod JavaScript pour shapez standalone ≥ 1.5 (système `MODS` natif) — pas de fork du client, installation par dépôt d'un fichier dans le dossier mods.
-- **Double connexion :** le mod instancie un second `ClientAPI` (endpoint paramétrable vers le serveur communautaire) à côté de `app.clientApi` (officiel, inchangé). Deux sessions/token indépendants. Prérequis : rendre l'endpoint injectable (constructeur) sans toucher au comportement par défaut.
+- **Double connexion :** le mod instancie un second `ClientAPI` (endpoint paramétrable vers le serveur communautaire) à côté de `app.clientApi` (officiel, inchangé). Deux sessions/token indépendants. Prérequis : rendre l'endpoint injectable (constructeur) sans toucher au comportement par défaut. **Cette injection n'est pas une simple commodité : côté Community Edition, `getEndpoint()` est figé en dur sur `https://api.shapez.io` (le switch dev/beta du client officiel a été retiré, remplacé par un commentaire `// TODO: Custom Puzzle DLC server / extract API into a mod?`) — c'est la seule voie pour faire dialoguer une build CE avec le serveur communautaire.** Le mod doit se charger et fonctionner identiquement sur les deux clients (officiel et CE ≥ 1.5).
+- **Auth côté Community Edition :** la CE n'effectue plus l'échange de ticket Steam automatique du client officiel (`ipcRenderer.invoke("steam:get-ticket")`) — le joueur saisit son token manuellement via une boîte de dialogue propre à la CE. Le flux oracle (4.4) reste inchangé côté backend : `app.clientApi.token` est exploité de façon identique quelle que soit son origine, une fois peuplé. Ce point est documenté dans la doc utilisateur (M4) pour éviter la confusion des joueurs CE.
 - **Fonction 1 — inscription/login** au serveur communautaire depuis le jeu, avec transmission du token officiel pour la vérification oracle (phase 1).
 - **Fonction 2 — export :** bouton dans l'onglet « My puzzles » du menu puzzle (`src/js/states/puzzle_menu.js`) qui itère : `clientApi.apiListPuzzles("mine")` → pour chaque puzzle `apiDownloadPuzzle(id)` → `communityApi.apiSubmitPuzzle(...)`. **Débit :** séquentiel, pause ≥ 1 s entre requêtes, reprise sur erreur, rapport de fin (exportés / ignorés / échoués). Idempotence via `shortKey` (déjà présent sur le serveur ⇒ ignoré).
 - **Fonction 3 — navigation :** consulter/jouer les puzzles du serveur communautaire depuis le menu (réutilisation de l'UI existante pointée sur `communityApi`).
@@ -276,7 +279,8 @@ Deux scénarios couverts par conception :
 | Risque | Impact | Mitigation |
 |--------|--------|------------|
 | Refus ou silence de tobspr | Perte des fonctions oracle + export | Fallback assumé : contenu neuf uniquement, inscription libre dès la phase 1 |
-| Interop lz-string défaillante (versions incompatibles) | Corruption des données importées | Test d'interop dès l'étape 3 ; option de repli : protocole non compressé entre mod et backend |
+| Double format de soumission (officiel compressé lz-string / Community Edition JSON brut, confirmé par comparaison directe des deux `ClientAPI` le 2026-08-08) | Puzzles CE rejetés ou corrompus si un seul format est supposé | Détection de format native à l'étape 3, pas un repli conditionnel — test d'interop contre les deux formats réels |
+| Endpoint figé côté Community Edition (`https://api.shapez.io` en dur, pas de switch dev) | Impossible de tester le contrat contre une vraie build CE avant que le mod existe | Vérification end-to-end contre la CE reportée à l'étape M1 (injection d'endpoint par le mod) ; patch local non distribué possible pour QA anticipée à l'étape 5 |
 | Extinction de `api.shapez.io` avant le lancement | Oracle inopérant | Basculer directement en phase 2 ; relancer tobspr sur la préservation du catalogue |
 | Démarrage à froid (catalogue vide) | Faible adoption | Export créateurs (M2), communication communautaire (Discord shapez, CE) |
 | Formule exacte difficulté/top-rated inconnue (backend officiel fermé) | Classements divergents | S'inspirer de gatez-backend ; assumer une formule propre documentée |
