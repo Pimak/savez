@@ -102,6 +102,42 @@ pub async fn find_puzzle_by_id(pool: &PgPool, id: i32) -> Result<Option<PuzzleFu
     }))
 }
 
+/// Creates a new user account. `verified_via` is always caller-supplied (e.g. `"official-api"`
+/// from the oracle login flow) — never a client-controlled value at the HTTP layer.
+///
+/// Does NOT bind `role`: the column's schema default (`'user'`) is the only source of truth for
+/// the role of an account created through this function. No public API path may ever write
+/// `role` — the first admin account is created exclusively via a seed migration/CLI (plan
+/// 05-06), never through `insert_user`. Mirrors `insert_puzzle`'s treatment of `author_id`.
+///
+/// Does NOT bind `email`, `password_hash` or `steam_id` either: all three are nullable and have
+/// no meaning for a Phase 5 oracle-verified account.
+///
+/// Does NOT pre-check name availability with a `SELECT` before the `INSERT` (would be a TOCTOU
+/// race and duplicate logic) — the `UNIQUE(name)` constraint is the single source of truth, same
+/// pattern as `puzzles.short_key` in `insert_puzzle`. A unique-violation maps to
+/// `AppError::NameTaken`; every other database error maps to `AppError::Database`. D-03 locked:
+/// never a silent merge, never a reused account, never an automatic suffix.
+pub async fn insert_user(pool: &PgPool, name: &str, verified_via: &str) -> Result<Uuid, AppError> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO users (name, verified_via)
+        VALUES ($1, $2)
+        RETURNING id
+        "#,
+        name,
+        verified_via,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|err| match &err {
+        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => AppError::NameTaken,
+        _ => AppError::Database(err),
+    })?;
+
+    Ok(row.id)
+}
+
 /// Resolves a puzzle by `short_key`. Same non-incrementing behavior as `find_puzzle_by_id`
 /// (D-06) — see that function's doc comment.
 pub async fn find_puzzle_by_short_key(
