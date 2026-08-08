@@ -123,16 +123,24 @@ pub async fn submit(
     Ok(Json(full.meta))
 }
 
-/// Resolves `id_or_key` as a numeric `id` first, falling back to a `short_key` lookup when it
-/// doesn't parse as `i32`. Does NOT increment `downloads` (D-06) nor compute `completed` (D-07,
-/// stays `false` — no current user exists before Phase 5).
+/// Resolves `id_or_key` as a `short_key` first (an exact match against the UNIQUE column is
+/// unambiguous regardless of whether the string happens to look numeric), falling back to a
+/// numeric `id` lookup only when no puzzle has that exact `short_key`. This ordering matters: a
+/// client-chosen `short_key` is not guaranteed to be non-numeric (structural validation of
+/// submitted `shortKey` values is deferred to Phase 6 — CONTEXT.md Deferred Ideas), so an
+/// id-first lookup could silently resolve an all-digit `short_key` to an unrelated puzzle that
+/// happens to share that numeric `id`. Does NOT increment `downloads` (D-06) nor compute
+/// `completed` (D-07, stays `false` — no current user exists before Phase 5).
 pub async fn download(
     State(state): State<AppState>,
     Path(id_or_key): Path<String>,
 ) -> Result<Json<PuzzleFullData>, AppError> {
+    if let Some(full) = repository::find_puzzle_by_short_key(&state.pool, &id_or_key).await? {
+        return Ok(Json(full));
+    }
     let full = match id_or_key.parse::<i32>() {
         Ok(id) => repository::find_puzzle_by_id(&state.pool, id).await?,
-        Err(_) => repository::find_puzzle_by_short_key(&state.pool, &id_or_key).await?,
+        Err(_) => None,
     };
     full.map(Json).ok_or(AppError::NotFound)
 }
