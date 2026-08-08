@@ -48,6 +48,201 @@ async fn mock_oracle_ok(expected_calls: u64) -> MockServer {
     server
 }
 
+/// Minimal, always-decodable `POST /v1/puzzles/submit` body (Community Edition raw-JSON wire
+/// format, D-08) — this file only exercises the auth boundary, not `decode_puzzle_data` itself
+/// (covered by `tests/persistence.rs` and `src/routes/puzzles.rs`'s own unit tests).
+fn sample_puzzle_body(short_key: &str) -> Value {
+    json!({
+        "title": "Auth Test Puzzle",
+        "shortKey": short_key,
+        "data": json!({
+            "version": 1,
+            "bounds": { "w": 10, "h": 8 },
+            "buildings": [],
+            "excludedBuildings": [],
+        })
+        .to_string(),
+    })
+}
+
+/// SC3 (ROADMAP): a protected route validates the server JWT's signature and expiration only —
+/// it never makes a second round-trip to the oracle. The mock's `.expect(1)` covers the login
+/// call; if `submit` triggered even one more oracle call, the mock would fail on drop.
+#[sqlx::test]
+async fn protected_route_does_not_call_oracle(pool: PgPool) {
+    let server = mock_oracle_ok(1).await;
+    let state = common::test_state_with_oracle(pool.clone(), &server.uri());
+    let app = savez::app(state);
+
+    let login_response = post_login(app.clone(), "valid-token", "oracle-once-player").await;
+    assert_eq!(login_response.status(), StatusCode::OK);
+    let login_body = body_to_json(login_response).await;
+    let jwt = login_body["token"]
+        .as_str()
+        .expect("login response has a token")
+        .to_string();
+
+    let submit_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &jwt)
+                .body(Body::from(
+                    sample_puzzle_body("protected-route-1").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(submit_response.status(), StatusCode::OK);
+    // `server`'s `.expect(1)` is verified when it is dropped at the end of this test: the oracle
+    // saw exactly the one call made during login, never one for the subsequent submit.
+}
+
+#[sqlx::test]
+async fn submit_without_token_is_401(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(sample_puzzle_body("no-token-1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles")
+        .fetch_one(&pool)
+        .await
+        .expect("count query");
+    assert_eq!(count, 0);
+}
+
+/// T-05-10: a valid JWT placed anywhere other than `x-token` must not authenticate — neither
+/// `Authorization: Bearer` nor `x-api-key` (the real client's own, application-identifying
+/// header) may substitute for it.
+#[sqlx::test]
+async fn submit_rejects_bearer_and_api_key(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let user_id = common::register_test_user(&pool, "bearer-test-user").await;
+    let token = common::jwt_for(user_id);
+
+    let bearer_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(sample_puzzle_body("bearer-1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bearer_response.status(), StatusCode::UNAUTHORIZED);
+
+    let api_key_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-api-key", &token)
+                .body(Body::from(sample_puzzle_body("api-key-1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(api_key_response.status(), StatusCode::UNAUTHORIZED);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles")
+        .fetch_one(&pool)
+        .await
+        .expect("count query");
+    assert_eq!(count, 0);
+}
+
+/// T-05-05: the author is always the JWT holder (user A), never a value the client asserts in the
+/// body (here, user B's id under a parasite `authorId` key) — mirrors T-03-21's precedent.
+#[sqlx::test]
+async fn submit_attributes_puzzle_to_jwt_user(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let user_a = common::register_test_user(&pool, "user-a").await;
+    let user_b = common::register_test_user(&pool, "user-b").await;
+    let token_a = common::jwt_for(user_a);
+
+    let mut body = sample_puzzle_body("attribution-1");
+    body["authorId"] = json!(user_b.to_string());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token_a)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let author_id: String =
+        sqlx::query_scalar("SELECT author_id::text FROM puzzles WHERE short_key = $1")
+            .bind("attribution-1")
+            .fetch_one(&pool)
+            .await
+            .expect("submitted puzzle row must exist");
+    assert_eq!(author_id, user_a.to_string());
+}
+
+/// T-05-25: a JWT can be correctly signed and unexpired yet still name a user that no longer (or
+/// never did) exist in `users` — the `puzzles.author_id` foreign key rejects the write, proving a
+/// signed token alone is not sufficient to create data for an arbitrary `sub`.
+#[sqlx::test]
+async fn submit_with_jwt_of_unknown_user_is_rejected(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let unknown_user_id = uuid::Uuid::new_v4();
+    let token = common::jwt_for(unknown_user_id);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
+                .body(Body::from(sample_puzzle_body("unknown-user-1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
+        .bind("unknown-user-1")
+        .fetch_one(&pool)
+        .await
+        .expect("count query");
+    assert_eq!(count, 0);
+}
+
 #[sqlx::test]
 async fn creates_account_on_valid_oracle_token(pool: PgPool) {
     let server = mock_oracle_ok(1).await;

@@ -43,3 +43,29 @@ pub fn test_state_with_oracle(pool: sqlx::PgPool, oracle_url: &str) -> savez::db
         http_client: savez::db::build_http_client().expect("test http client"),
     }
 }
+
+/// Creates a throwaway user row directly (bypassing the oracle login flow entirely) for tests
+/// that only need *a* valid, existing `users.id` to build an authenticated request around. Uses a
+/// dynamic query (`sqlx::query_scalar`, not the `query!` macro) deliberately: a test-only insert
+/// has no business growing the versioned `.sqlx` offline cache.
+pub async fn register_test_user(pool: &sqlx::PgPool, name: &str) -> uuid::Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (name, verified_via) VALUES ($1, 'test-fixture') RETURNING id",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .expect("insert test user")
+}
+
+/// Issues a server JWT for `user_id` using the same key (`TEST_JWT_KEY`) every `test_state*`
+/// helper above configures `AppState.jwt_key` with, so a token minted here always validates
+/// against an `AppState` built by this module.
+pub fn jwt_for(user_id: uuid::Uuid) -> String {
+    savez::auth::jwt::issue(
+        TEST_JWT_KEY,
+        user_id,
+        savez::auth::jwt::DEFAULT_LIFETIME_SECS,
+    )
+    .expect("issue test jwt")
+}
