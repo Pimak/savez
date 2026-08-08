@@ -93,16 +93,67 @@ pub struct PuzzleFullData {
     pub game: PuzzleGameData,
 }
 
-/// Body of `POST /v1/puzzles/submit`. Deliberately has NO `author`/`authorId` field: the author
-/// is always the server-side seeded dev user in Phase 3 (D-02) and will be the JWT-authenticated
-/// user from Phase 5 onward — never a client-supplied value (threat T-03-11). Do not add an
-/// author-shaped field here "for convenience"; the server always determines authorship itself.
+/// Internal type constructed AFTER `decode_puzzle_data` succeeds (D-08) — no longer the wire body
+/// of `POST /v1/puzzles/submit` (see `SubmitPuzzlePayload` for that). Deliberately has NO
+/// `author`/`authorId` field: the author is always the server-side seeded dev user in Phase 3
+/// (D-02) and will be the JWT-authenticated user from Phase 5 onward — never a client-supplied
+/// value (threat T-03-11). Do not add an author-shaped field here "for convenience"; the server
+/// always determines authorship itself.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitPuzzleRequest {
     pub title: String,
     pub short_key: String,
     pub data: PuzzleGameData,
+}
+
+/// Wire body of `POST /v1/puzzles/submit` (D-08, confirmed against real client source, not just
+/// inferred from the CE FIXME comment): `data` arrives as a `String`, never a nested object — the
+/// official client sends `compressX64(JSON.stringify(payload.data))`
+/// (`tobspr-games/shapez.io`), the Community Edition client sends `JSON.stringify(payload.data)`
+/// (`tobspr-games/shapez-community-edition`, its own FIXME notwithstanding). `decode_puzzle_data`
+/// detects which of the two formats a given submission used.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitPuzzlePayload {
+    pub title: String,
+    pub short_key: String,
+    pub data: String,
+}
+
+/// D-06/D-07: a real puzzle's decompressed `data` is a few dozen KiB; this is a wide safety
+/// margin against a small compressed input expanding into a huge string (decompression bomb,
+/// T-04-01) before any JSON parsing is attempted.
+const MAX_DECOMPRESSED_PUZZLE_DATA_BYTES: usize = 1_048_576; // ~1 MiB
+
+/// Detects and decodes either wire format of `data` (D-08/DEC-dual-submit-format): tries a direct
+/// JSON parse first (Community Edition's actual behavior), then falls back to lz-string
+/// (`compressX64`/EncodedURIComponent) decompression (the official client's actual behavior).
+/// Neither `.unwrap()` nor `.expect()` is used on the fallible steps below (T-04-02, Pitfall 3
+/// in RESEARCH.md): a crafted malformed input must never panic the request handler.
+fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
+    // D-08: Community Edition sends raw, uncompressed JSON.
+    if let Ok(data) = serde_json::from_str::<PuzzleGameData>(raw) {
+        return Ok(data);
+    }
+
+    // D-08: the official client sends `compressX64` (lz-string, EncodedURIComponent variant).
+    // D-04/D-05: an input that decodes as neither format fails here — never a partial decode,
+    // never a 200.
+    let units =
+        lz_str::decompress_from_encoded_uri_component(raw).ok_or(AppError::InvalidPuzzleData)?;
+    // T-04-02/Pitfall 3: a dangling UTF-16 surrogate fails here (`Result::Err`), not above
+    // (`Option::None`) — both paths must be handled, never `.unwrap()`.
+    let json = String::from_utf16(&units).map_err(|_| AppError::InvalidPuzzleData)?;
+
+    // D-06/D-07: reject before parsing. The decompressed size — not axum's DefaultBodyLimit,
+    // which only bounds the compressed wire size (T-04-01) — is what a decompression bomb
+    // inflates.
+    if json.len() > MAX_DECOMPRESSED_PUZZLE_DATA_BYTES {
+        return Err(AppError::InvalidPuzzleData);
+    }
+
+    serde_json::from_str(&json).map_err(|_| AppError::InvalidPuzzleData)
 }
 
 // TODO(Phase 6): the exact submission response shape (and the `T.backendErrors` error codes) is
@@ -114,9 +165,15 @@ pub struct SubmitPuzzleRequest {
 // without effect (T-03-21) — `repository::insert_puzzle` always writes `DEV_SEED_AUTHOR_ID`.
 pub async fn submit(
     State(state): State<AppState>,
-    Json(payload): Json<SubmitPuzzleRequest>,
+    Json(payload): Json<SubmitPuzzlePayload>,
 ) -> Result<Json<PuzzleMetadata>, AppError> {
-    let id = repository::insert_puzzle(&state.pool, &payload).await?;
+    let data = decode_puzzle_data(&payload.data)?;
+    let request = SubmitPuzzleRequest {
+        title: payload.title,
+        short_key: payload.short_key,
+        data,
+    };
+    let id = repository::insert_puzzle(&state.pool, &request).await?;
     let full = repository::find_puzzle_by_id(&state.pool, id)
         .await?
         .ok_or(AppError::NotFound)?;
