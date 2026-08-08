@@ -34,14 +34,12 @@ pub fn issue(
     )
 }
 
-// STUB (RED phase): validate() intentionally leaves two safety-critical gaps open so the
-// negative-path tests below fail against this version — validate_exp is disabled, and the
-// accepted algorithm set is broadened to include HS512. Both are fixed in the GREEN commit.
-/// Valide un JWT HS256 signé avec `jwt_key`.
+/// Valide un JWT HS256 signé avec `jwt_key`. N'accepte QUE HS256, explicitement construit via
+/// `Validation::new` — ne jamais s'appuyer sur la validation implicite par défaut de la
+/// bibliothèque, dont la liste d'algorithmes acceptés peut être plus large que voulu (confusion
+/// d'algorithme, T-05-02).
 pub fn validate(jwt_key: &str, token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.validate_exp = false;
-    validation.algorithms = vec![Algorithm::HS256, Algorithm::HS512];
+    let validation = Validation::new(Algorithm::HS256);
     decode::<Claims>(
         token,
         &DecodingKey::from_secret(jwt_key.as_bytes()),
