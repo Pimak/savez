@@ -44,7 +44,8 @@ impl IntoResponse for AuthRejection {
 }
 
 /// Pure function, deliberately separate from `from_request_parts`: testable directly against a
-/// `HeaderMap` with no `AppState`/`PgPool` needed, so these tests never touch a database.
+/// `HeaderMap` with no `AppState`/database connection needed, so these tests never touch a
+/// database.
 ///
 /// Two prohibitions, both non-negotiable (CON-api-contract, T-05-10):
 /// - `Authorization: Bearer ...` is never read here — the shapez ClientAPI contract has no
@@ -58,19 +59,19 @@ impl IntoResponse for AuthRejection {
 /// D-07 (Phase 5 scope): signature + expiration only, no database access. TODO(Phase 7): ban/role
 /// enforcement re-reads current state from the database by `sub` (REQ-moderation) — never a claim
 /// added to the JWT itself (would go stale for the token's full 30-day lifetime, D-06).
-// RED (Task 1, TDD): deliberately widened beyond the two prohibitions above, so the tests proving
-// them fail for a real, callable reason before the GREEN commit closes the gap.
+///
+/// Single source-of-truth literal for the header name: referenced by name everywhere else in this
+/// module (including tests) so the string appears exactly once in this file.
+const AUTH_HEADER_NAME: &str = "x-token";
+
 pub(crate) fn authenticate_headers(
     headers: &HeaderMap,
     jwt_key: &str,
 ) -> Result<AuthUser, AuthRejection> {
-    let raw = headers
-        .get("x-token")
-        .or_else(|| headers.get("authorization"))
-        .or_else(|| headers.get("x-api-key"))
+    let token = headers
+        .get(AUTH_HEADER_NAME)
         .and_then(|value| value.to_str().ok())
         .ok_or(AuthRejection::MissingToken)?;
-    let token = raw.strip_prefix("Bearer ").unwrap_or(raw);
 
     let claims =
         crate::auth::jwt::validate(jwt_key, token).map_err(|_| AuthRejection::InvalidToken)?;
@@ -113,7 +114,7 @@ mod tests {
         let token =
             crate::auth::jwt::issue(TEST_KEY, user_id, crate::auth::jwt::DEFAULT_LIFETIME_SECS)
                 .expect("issue test jwt");
-        let headers = headers_with("x-token", &token);
+        let headers = headers_with(AUTH_HEADER_NAME, &token);
 
         let auth_user =
             authenticate_headers(&headers, TEST_KEY).expect("valid x-token must authenticate");
@@ -159,7 +160,7 @@ mod tests {
 
     #[test]
     fn rejects_garbage_token() {
-        let headers = headers_with("x-token", "not-a-jwt");
+        let headers = headers_with(AUTH_HEADER_NAME, "not-a-jwt");
         assert!(matches!(
             authenticate_headers(&headers, TEST_KEY),
             Err(AuthRejection::InvalidToken)
@@ -178,7 +179,7 @@ mod tests {
             &EncodingKey::from_secret(TEST_KEY.as_bytes()),
         )
         .expect("encode expired token");
-        let headers = headers_with("x-token", &token);
+        let headers = headers_with(AUTH_HEADER_NAME, &token);
 
         assert!(matches!(
             authenticate_headers(&headers, TEST_KEY),
@@ -195,7 +196,7 @@ mod tests {
             crate::auth::jwt::DEFAULT_LIFETIME_SECS,
         )
         .expect("issue test jwt");
-        let headers = headers_with("x-token", &token);
+        let headers = headers_with(AUTH_HEADER_NAME, &token);
 
         assert!(matches!(
             authenticate_headers(&headers, TEST_KEY),
