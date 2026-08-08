@@ -84,6 +84,39 @@ mod tests {
         assert_eq!(config.jwt_key, "test-key");
         assert_eq!(config.official_api_url, "https://api.shapez.io");
         assert_eq!(config.port, 15001);
+        assert_eq!(config.auth_mode, AuthMode::Oracle);
+    }
+
+    #[test]
+    fn missing_auth_mode_defaults_to_oracle() {
+        let mut map = full_map();
+        map.remove("AUTH_MODE");
+        let config = Config::from_lookup(lookup_from(&map)).unwrap();
+        assert_eq!(config.auth_mode, AuthMode::Oracle);
+    }
+
+    #[test]
+    fn auth_mode_open_parses() {
+        let mut map = full_map();
+        map.insert("AUTH_MODE", "open");
+        let config = Config::from_lookup(lookup_from(&map)).unwrap();
+        assert_eq!(config.auth_mode, AuthMode::Open);
+    }
+
+    #[test]
+    fn auth_mode_steam_openid_parses() {
+        let mut map = full_map();
+        map.insert("AUTH_MODE", "steam-openid");
+        let config = Config::from_lookup(lookup_from(&map)).unwrap();
+        assert_eq!(config.auth_mode, AuthMode::SteamOpenId);
+    }
+
+    #[test]
+    fn invalid_auth_mode_errors() {
+        let mut map = full_map();
+        map.insert("AUTH_MODE", "steam");
+        let err = expect_err(Config::from_lookup(lookup_from(&map)));
+        assert!(matches!(err, ConfigError::InvalidAuthMode(v) if v == "steam"));
     }
 
     #[test]
