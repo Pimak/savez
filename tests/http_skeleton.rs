@@ -1,12 +1,13 @@
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use savez::db::AppState;
 use sqlx::PgPool;
 use tower::ServiceExt; // for `oneshot`
 
 #[sqlx::test]
 async fn healthz_returns_200(pool: PgPool) {
-    let state = AppState { pool };
+    let state = common::test_state(pool);
     let response = savez::app(state)
         .oneshot(
             Request::builder()
@@ -21,7 +22,7 @@ async fn healthz_returns_200(pool: PgPool) {
 
 #[sqlx::test]
 async fn list_new_returns_200_json_array(pool: PgPool) {
-    let state = AppState { pool };
+    let state = common::test_state(pool);
     let response = savez::app(state)
         .oneshot(
             Request::builder()
@@ -40,7 +41,7 @@ async fn list_new_returns_200_json_array(pool: PgPool) {
 
 #[sqlx::test]
 async fn cors_preflight_allows_expected_headers(pool: PgPool) {
-    let state = AppState { pool };
+    let state = common::test_state(pool);
     let response = savez::app(state)
         .oneshot(
             Request::builder()
