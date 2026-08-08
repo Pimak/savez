@@ -420,6 +420,41 @@ async fn download_does_not_increment_counter(pool: PgPool) {
     assert_eq!(downloads, 0);
 }
 
+/// D-04/D-05: a `data` value that is neither valid JSON (Community Edition format) nor a valid
+/// lz-string (official `compressX64` format) is rejected with a 400 and creates no row — this
+/// 400 status is temporary until Phase 6's all-200/`T.backendErrors` convention lands.
+#[sqlx::test]
+async fn submit_rejects_undecodable_payload(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    let body = json!({
+        "title": "Undecodable Puzzle",
+        "shortKey": "undecodable-1",
+        "data": "not-valid-lzstring-!!@@##",
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
+        .bind("undecodable-1")
+        .fetch_one(&pool)
+        .await
+        .expect("count query must succeed");
+    assert_eq!(count, 0, "no puzzle row must be created for an undecodable payload");
+}
+
 /// Pitfall 1 lock-in: Postgres has no unsigned integer type, so `likes`/`downloads`/`completions`
 /// are stored `i32` and cast to `u32` on the way out. This proves non-zero values round-trip
 /// intact through that cast rather than silently wrapping or truncating.
