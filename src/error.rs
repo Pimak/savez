@@ -14,6 +14,13 @@ pub enum AppError {
     Database(#[from] sqlx::Error),
     #[error("not found")]
     NotFound,
+    // TODO(Phase 6): replace with the full `T.backendErrors` taxonomy mapping
+    // (DEC-api-contract-conventions) — this is a temporary generic "bad request" bucket for the
+    // Phase 4 decode-failure path (D-04/D-05): neither JSON-direct nor lz-string decompression
+    // produced a valid `PuzzleGameData`, or the decompressed payload exceeded
+    // MAX_DECOMPRESSED_PUZZLE_DATA_BYTES (D-06/D-07).
+    #[error("invalid puzzle data")]
+    InvalidPuzzleData,
 }
 
 impl IntoResponse for AppError {
@@ -24,6 +31,7 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
             AppError::NotFound => StatusCode::NOT_FOUND.into_response(),
+            AppError::InvalidPuzzleData => StatusCode::BAD_REQUEST.into_response(),
         }
     }
 }
