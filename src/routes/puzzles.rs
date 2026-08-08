@@ -123,8 +123,20 @@ pub struct SubmitPuzzlePayload {
 
 /// D-06/D-07: a real puzzle's decompressed `data` is a few dozen KiB; this is a wide safety
 /// margin against a small compressed input expanding into a huge string (decompression bomb,
-/// T-04-01) before any JSON parsing is attempted.
+/// T-04-01) before any JSON parsing is attempted. Applied uniformly to BOTH wire formats (04-REVIEW.md
+/// WR-01): on the Community Edition path `raw` IS the uncompressed payload, so this bounds it
+/// directly; on the official-client path it bounds the post-decompression result as a second,
+/// redundant check (the binding constraint there is MAX_COMPRESSED_PUZZLE_DATA_BYTES below).
 const MAX_DECOMPRESSED_PUZZLE_DATA_BYTES: usize = 1_048_576; // ~1 MiB
+
+/// 04-REVIEW.md CR-01: `lz_str::decompress_from_encoded_uri_component` has no incremental/bounded
+/// output API — it fully materializes its result in memory before this function ever sees it, and
+/// its LZW-family algorithm has no built-in cap on that output size (a small compressed input can
+/// expand at up to O(N^2) in the number of decoded codes). MAX_DECOMPRESSED_PUZZLE_DATA_BYTES
+/// alone cannot defend against this because by the time it runs the damage (unbounded allocation)
+/// is already done. This bounds the *compressed* input instead, before decompression is ever
+/// attempted. Real compressX64 payloads for a puzzle are a few KiB; 64 KiB is a wide margin.
+const MAX_COMPRESSED_PUZZLE_DATA_BYTES: usize = 65_536; // 64 KiB
 
 /// Detects and decodes either wire format of `data` (D-08/DEC-dual-submit-format): tries a direct
 /// JSON parse first (Community Edition's actual behavior), then falls back to lz-string
@@ -132,9 +144,25 @@ const MAX_DECOMPRESSED_PUZZLE_DATA_BYTES: usize = 1_048_576; // ~1 MiB
 /// Neither `.unwrap()` nor `.expect()` is used on the fallible steps below (T-04-02, Pitfall 3
 /// in RESEARCH.md): a crafted malformed input must never panic the request handler.
 fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
+    // D-06/D-07 + WR-01: reject an oversized raw payload before attempting EITHER format. On the
+    // Community Edition path this directly enforces the ~1 MiB ceiling (raw IS the uncompressed
+    // JSON here); on the official-client path a compressed payload this large is already far
+    // beyond any real puzzle and is rejected before the far tighter compressed-length check below.
+    if raw.len() > MAX_DECOMPRESSED_PUZZLE_DATA_BYTES {
+        return Err(AppError::InvalidPuzzleData);
+    }
+
     // D-08: Community Edition sends raw, uncompressed JSON.
     if let Ok(data) = serde_json::from_str::<PuzzleGameData>(raw) {
         return Ok(data);
+    }
+
+    // CR-01: reject a clearly-oversized *compressed* input BEFORE calling
+    // decompress_from_encoded_uri_component — the check must run before decompression is
+    // attempted, not after its result is materialized, since that materialization is itself the
+    // unbounded-memory-allocation risk this guard exists to prevent.
+    if raw.len() > MAX_COMPRESSED_PUZZLE_DATA_BYTES {
+        return Err(AppError::InvalidPuzzleData);
     }
 
     // D-08: the official client sends `compressX64` (lz-string, EncodedURIComponent variant).
@@ -146,9 +174,9 @@ fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
     // (`Option::None`) — both paths must be handled, never `.unwrap()`.
     let json = String::from_utf16(&units).map_err(|_| AppError::InvalidPuzzleData)?;
 
-    // D-06/D-07: reject before parsing. The decompressed size — not axum's DefaultBodyLimit,
-    // which only bounds the compressed wire size (T-04-01) — is what a decompression bomb
-    // inflates.
+    // D-06/D-07: redundant with the compressed-length check above (which is the actual binding
+    // constraint here since MAX_COMPRESSED_PUZZLE_DATA_BYTES < MAX_DECOMPRESSED_PUZZLE_DATA_BYTES),
+    // kept as defense in depth per the literal D-06 wording ("checked before JSON parsing").
     if json.len() > MAX_DECOMPRESSED_PUZZLE_DATA_BYTES {
         return Err(AppError::InvalidPuzzleData);
     }
@@ -255,6 +283,17 @@ mod tests {
 
         let compressed = lz_str::compress_to_encoded_uri_component(&big_json[..]);
         assert!(decode_puzzle_data(&compressed).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_compressed_input_before_decompression() {
+        // 04-REVIEW.md CR-01 regression: a compressed-looking input larger than
+        // MAX_COMPRESSED_PUZZLE_DATA_BYTES must be rejected without ever reaching
+        // lz_str::decompress_from_encoded_uri_component — real compressX64 output for a puzzle is
+        // a few KiB, so this only ever rejects payloads far outside legitimate use.
+        let oversized_compressed_looking: String = "A".repeat(MAX_COMPRESSED_PUZZLE_DATA_BYTES + 1);
+        assert!(oversized_compressed_looking.len() > MAX_COMPRESSED_PUZZLE_DATA_BYTES);
+        assert!(decode_puzzle_data(&oversized_compressed_looking).is_err());
     }
 
     #[test]
