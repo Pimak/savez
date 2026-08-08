@@ -144,3 +144,69 @@ pub async fn download(
     };
     full.map(Json).ok_or(AppError::NotFound)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Source: compressX64 output from tobspr-games/shapez.io, commit
+    // ae88eb48b2834e32fd8c5cf5d91179c6328d78db
+    const OFFICIAL_FIXTURE: &str = "N4IgbgpgTgzglgewHYgFwEYA0IBGCCuSAJjGqAO5roAM2AFmgBwC+2O+cANkXEgOalUAbVAAXAJ4AHCGhAQAtnFGjoIbEoWyYdAIbTUAYXxGT+NSEkJBoAB5paIcfexR7zVmKkzUIPgh2c5hryWrr6pqbmltYgdqgArNhOCS5oAJzU7pie0rI4nAgAxgDWUVZksWgATEnVqRiMmcwAutgQNoWc+EQQRABCHNy8AmhCIEbK0ACycFBQCFC9IM3MQA";
+
+    // Source: JSON.stringify shape confirmed against tobspr-games/shapez-community-edition,
+    // commit a3fdbf4f594772bbb8b72910987e7a23008fea8f, src/js/platform/api.js:255
+    const CE_FIXTURE: &str = r#"{"version":1,"bounds":{"w":10,"h":8},"buildings":[{"type":"emitter","item":"shape:CuCuCuCu","pos":{"x":0,"y":0,"r":0}},{"type":"goal","item":"shape:CuCuCuCu","pos":{"x":5,"y":5,"r":90}},{"type":"block","pos":{"x":2,"y":2,"r":180}}],"excludedBuildings":["CutterMirrored"]}"#;
+
+    #[test]
+    fn decodes_authentic_official_compressed_fixture() {
+        assert_eq!(OFFICIAL_FIXTURE.len(), 256, "fixture must not be truncated");
+        let data = decode_puzzle_data(OFFICIAL_FIXTURE).expect("official fixture must decode");
+        assert_eq!(data.bounds.w, 10);
+        assert_eq!(data.bounds.h, 8);
+        assert_eq!(data.buildings.len(), 3);
+        assert_eq!(data.excluded_buildings, vec!["CutterMirrored".to_string()]);
+    }
+
+    #[test]
+    fn decodes_authentic_ce_raw_json_fixture() {
+        let data = decode_puzzle_data(CE_FIXTURE).expect("CE fixture must decode");
+        assert_eq!(data.bounds.w, 10);
+        assert_eq!(data.bounds.h, 8);
+        assert_eq!(data.buildings.len(), 3);
+        assert_eq!(data.excluded_buildings, vec!["CutterMirrored".to_string()]);
+    }
+
+    #[test]
+    fn rejects_oversized_decompressed_payload() {
+        // Inflate `excludedBuildings` on an otherwise-valid PuzzleGameData well past
+        // MAX_DECOMPRESSED_PUZZLE_DATA_BYTES (D-06/D-07), targeting ~1.05-1.2 MiB decompressed.
+        let big_excluded: Vec<String> = (0..90_000).map(|i| format!("Building{i}")).collect();
+        let big_data = PuzzleGameData {
+            version: 1,
+            bounds: Bounds { w: 10, h: 8 },
+            buildings: vec![],
+            excluded_buildings: big_excluded,
+        };
+        let big_json = serde_json::to_string(&big_data).expect("serialize big PuzzleGameData");
+        assert!(
+            big_json.len() > MAX_DECOMPRESSED_PUZZLE_DATA_BYTES,
+            "test fixture must actually exceed the size guard"
+        );
+        // Prove the payload is otherwise well-formed: rejection below must come from the size
+        // guard, not from malformed content.
+        assert!(serde_json::from_str::<PuzzleGameData>(&big_json).is_ok());
+
+        let compressed = lz_str::compress_to_encoded_uri_component(&big_json[..]);
+        assert!(decode_puzzle_data(&compressed).is_err());
+    }
+
+    #[test]
+    fn rejects_undecodable_payload_without_panic() {
+        for input in ["not-valid-lzstring-!!@@##", "", "{}", "N4IgbgpgTgzg"] {
+            assert!(
+                decode_puzzle_data(input).is_err(),
+                "expected input {input:?} to be rejected"
+            );
+        }
+    }
+}
