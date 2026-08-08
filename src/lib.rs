@@ -22,6 +22,7 @@ pub fn app(state: db::AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(routes::health::healthz))
+        .route("/v1/public/login", post(routes::auth::login))
         .route("/v1/puzzles/list/{category}", get(routes::puzzles::list))
         .route("/v1/puzzles/submit", post(routes::puzzles::submit))
         .route(
