@@ -250,6 +250,48 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
     assert_eq!(not_found_response.status(), StatusCode::NOT_FOUND);
 }
 
+/// Regression test (code review CR-01): a puzzle whose `short_key` happens to look numeric must
+/// still resolve to itself, not to a different puzzle that happens to share that numeric `id`.
+/// `short_key` lookup must take priority over a coincidental numeric parse of `id_or_key`.
+#[sqlx::test]
+async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) {
+    let state = AppState { pool: pool.clone() };
+    let app = savez::app(state);
+
+    // First puzzle: whatever numeric `id` the DB assigns it (e.g. 1).
+    let decoy = submit_puzzle(app.clone(), "decoy-puzzle", "Decoy").await;
+    let decoy_id = decoy["id"].as_u64().expect("decoy id is a number");
+
+    // Second puzzle: its `short_key` is literally the decoy's numeric id as a string.
+    let numeric_key = decoy_id.to_string();
+    let target = submit_puzzle(app.clone(), &numeric_key, "Numeric ShortKey Puzzle").await;
+    let target_id = target["id"].as_u64().expect("target id is a number");
+    assert_ne!(
+        decoy_id, target_id,
+        "test setup requires two distinct puzzle ids"
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{numeric_key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+
+    assert_eq!(
+        body["meta"]["id"].as_u64(),
+        Some(target_id),
+        "download/{numeric_key} must resolve by short_key match, not by coincidentally parsing \
+         as the decoy puzzle's numeric id"
+    );
+    assert_eq!(body["meta"]["shortKey"], numeric_key);
+}
+
 async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value {
     let body = json!({
         "title": title,
