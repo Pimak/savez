@@ -31,7 +31,14 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
             AppError::NotFound => StatusCode::NOT_FOUND.into_response(),
-            AppError::InvalidPuzzleData => StatusCode::BAD_REQUEST.into_response(),
+            AppError::InvalidPuzzleData => {
+                // WR-02 (04-REVIEW.md): every decode failure lands here — malformed input,
+                // oversized payloads, and rejected decompression-bomb attempts alike. Without
+                // this, repeated probing of the decode path (including the CR-01 bomb vector)
+                // leaves no trace in logs/metrics.
+                tracing::warn!("rejected puzzle submission: invalid or oversized data");
+                StatusCode::BAD_REQUEST.into_response()
+            }
         }
     }
 }
