@@ -104,15 +104,34 @@ async fn migrations_create_all_tables(pool: PgPool) {
         assert!(exists, "expected table `{table}` to exist in public schema");
     }
 
-    let seed_row: (String, String) = sqlx::query_as(
-        "SELECT name, verified_via FROM users WHERE id = '00000000-0000-0000-0000-000000000001'",
+    // Phase 5 (D-08): the Phase 3 temporary submission-author row (verified_via='dev-seed') is
+    // retired on every fresh database — JWT auth now supplies a real author_id for every
+    // submission, so the mechanism is gone (see migrations/20260808000002_retire_dev_seed_author.sql).
+    let retired_seed_author_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM users WHERE id = '00000000-0000-0000-0000-000000000001'",
     )
     .fetch_one(&pool)
     .await
-    .expect("D-02 seed row must exist after migrations run");
+    .expect("count query must succeed");
     assert_eq!(
-        seed_row,
-        ("dev-seed-author".to_string(), "dev-seed".to_string())
+        retired_seed_author_count, 0,
+        "the retired Phase 3 seed-author row must not exist on a fresh database"
+    );
+
+    // D-08: the first administrator exists and was only ever created by this seed migration.
+    let admin_row: (String, String, String) = sqlx::query_as(
+        "SELECT name, verified_via, role FROM users WHERE id = '00000000-0000-0000-0000-000000000002'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("seed admin row must exist after migrations run");
+    assert_eq!(
+        admin_row,
+        (
+            "admin".to_string(),
+            "seed-admin".to_string(),
+            "admin".to_string()
+        )
     );
 }
 
