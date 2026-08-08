@@ -148,7 +148,7 @@ async fn submit_persists_puzzle(pool: PgPool) {
     let body = json!({
         "title": "Test Puzzle",
         "shortKey": "submit-persists-1",
-        "data": sample_game_data(),
+        "data": sample_game_data().to_string(),
         "author": "attaquant",
         "authorId": "11111111-1111-1111-1111-111111111111",
     });
@@ -186,7 +186,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
     let submit_body = json!({
         "title": "Download Test Puzzle",
         "shortKey": "download-both-1",
-        "data": sample_game_data(),
+        "data": sample_game_data().to_string(),
     });
 
     let submit_response = app
@@ -296,7 +296,7 @@ async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value
     let body = json!({
         "title": title,
         "shortKey": short_key,
-        "data": sample_game_data(),
+        "data": sample_game_data().to_string(),
     });
     let response = app
         .oneshot(
@@ -452,7 +452,10 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .expect("count query must succeed");
-    assert_eq!(count, 0, "no puzzle row must be created for an undecodable payload");
+    assert_eq!(
+        count, 0,
+        "no puzzle row must be created for an undecodable payload"
+    );
 }
 
 /// Pitfall 1 lock-in: Postgres has no unsigned integer type, so `likes`/`downloads`/`completions`
