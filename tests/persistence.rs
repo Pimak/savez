@@ -1,7 +1,8 @@
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
-use savez::db::AppState;
 use savez::routes::puzzles::{Bounds, Pos, PuzzleGameBuilding, PuzzleGameData};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -142,7 +143,7 @@ async fn body_to_json(response: axum::response::Response) -> Value {
 /// D-02 seed author — never to the values the client sent.
 #[sqlx::test]
 async fn submit_persists_puzzle(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     let body = json!({
@@ -180,7 +181,7 @@ async fn submit_persists_puzzle(pool: PgPool) {
 /// shape, and an unknown id resolves to 404.
 #[sqlx::test]
 async fn download_by_id_and_by_short_key(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     let submit_body = json!({
@@ -255,7 +256,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
 /// `short_key` lookup must take priority over a coincidental numeric parse of `id_or_key`.
 #[sqlx::test]
 async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     // First puzzle: whatever numeric `id` the DB assigns it (e.g. 1).
@@ -317,7 +318,7 @@ async fn submit_puzzle(app: axum::Router, short_key: &str, title: &str) -> Value
 /// most-recently-submitted first (`created_at DESC, id DESC`), each attributed to the seed author.
 #[sqlx::test]
 async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     submit_puzzle(app.clone(), "list-new-first", "First Puzzle").await;
@@ -346,7 +347,7 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
 /// copy of `new`'s content, even once puzzles exist.
 #[sqlx::test]
 async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     submit_puzzle(app.clone(), "list-empty-1", "Some Puzzle").await;
@@ -375,7 +376,7 @@ async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
 /// D-06/D-07: downloading a puzzle never increments `downloads` and never flips `completed`.
 #[sqlx::test]
 async fn download_does_not_increment_counter(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     submit_puzzle(app.clone(), "download-counter-1", "Counter Puzzle").await;
@@ -425,7 +426,7 @@ async fn download_does_not_increment_counter(pool: PgPool) {
 /// 400 status is temporary until Phase 6's all-200/`T.backendErrors` convention lands.
 #[sqlx::test]
 async fn submit_rejects_undecodable_payload(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     let body = json!({
@@ -463,7 +464,7 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
 /// intact through that cast rather than silently wrapping or truncating.
 #[sqlx::test]
 async fn counters_round_trip_as_u32(pool: PgPool) {
-    let state = AppState { pool: pool.clone() };
+    let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
     submit_puzzle(app.clone(), "counters-roundtrip-1", "Roundtrip Puzzle").await;
