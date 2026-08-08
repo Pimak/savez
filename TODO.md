@@ -40,12 +40,12 @@ Légende : `[ ]` à faire · `[x]` fait
 - [ ] Types `PuzzleMetadata` et `PuzzleGameData` conformes à `savegame_typedefs.js`
 - [ ] **Critère de fin : CRUD vérifié via tests d'intégration**
 
-## Étape 3 — Interop compression lz-string
+## Étape 3 — Interop compression lz-string (double format officiel/CE)
 
-- [ ] Dépendance `lz-str` — décompression du champ `data` à la soumission (variante EncodedURIComponent, compatible `compressX64` du client)
-- [ ] Stockage décompressé, servi tel quel au download
-- [ ] **Critère de fin : test unitaire d'interop avec une chaîne produite par le client réel**
-- [ ] (Repli documenté si interop défaillante : protocole non compressé entre mod et backend)
+- [ ] Dépendance `lz-str` — décompression du champ `data` à la soumission (variante EncodedURIComponent, compatible `compressX64` du client officiel)
+- [ ] Détection automatique de format à la soumission : le client officiel compresse `data` (`compressX64`), la Community Edition envoie du JSON brut non compressé (bug assumé côté CE, cf. commentaire `FIXME` dans son `api.js`) — tenter `JSON.parse` direct, puis décompression lz-string en repli. Les deux formats sont des cibles permanentes, pas un mode de secours
+- [ ] Stockage décompressé, servi tel quel au download (aucun client ne décompresse à la lecture — pas de divergence de ce côté)
+- [ ] **Critère de fin : deux tests unitaires d'interop passent — un contre une chaîne compressée produite par le client officiel réel, un contre une chaîne JSON brute produite par la Community Edition réelle**
 
 ## Étape 4 — Authentification
 

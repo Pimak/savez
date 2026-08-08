@@ -14,6 +14,7 @@ Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with
 - Give creators a tool to port their own puzzles away from the official service.
 - Avoid harming the Puzzle DLC's commercial model while the official service is alive (access restricted to DLC owners).
 - Serve as a Rust learning project for the author.
+- Support both real shapez 1 clients in active use — the official client ([tobspr-games/shapez.io](https://github.com/tobspr-games/shapez.io)) and the community-maintained [Community Edition](https://github.com/tobspr-games/shapez-community-edition) — whose `ClientAPI` implementations diverge on the puzzle submission payload format (compressed vs raw JSON), the API endpoint (configurable vs hardcoded), and how the oracle token is obtained (automatic Steam ticket vs manual entry). See `docs/cahier-des-charges.md` §4.2/§5/§8.
 
 ## Non-goals
 
