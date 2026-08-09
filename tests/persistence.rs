@@ -241,6 +241,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/puzzles/download/{id}"))
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -254,6 +255,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri("/v1/puzzles/download/RuRuRuRu")
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -271,6 +273,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri("/v1/puzzles/download/999999")
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -322,6 +325,7 @@ async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) 
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/puzzles/download/{numeric_key}"))
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -379,6 +383,7 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri("/v1/puzzles/list/new")
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -412,6 +417,7 @@ async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
             .oneshot(
                 Request::builder()
                     .uri(format!("/v1/puzzles/list/{category}"))
+                    .header("x-token", &token)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -444,6 +450,7 @@ async fn download_does_not_increment_counter(pool: PgPool) {
             .oneshot(
                 Request::builder()
                     .uri("/v1/puzzles/download/CyCyCyCy")
+                    .header("x-token", &token)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -456,6 +463,7 @@ async fn download_does_not_increment_counter(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri("/v1/puzzles/list/new")
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -548,6 +556,7 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri("/v1/puzzles/list/new")
+                .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
