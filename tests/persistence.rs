@@ -158,6 +158,14 @@ async fn body_to_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).expect("response body is valid JSON")
 }
 
+/// D-17: every business/auth rejection answers HTTP 200 with `{ "error": "<code>" }` — this
+/// helper asserts both halves of that contract in one call.
+async fn assert_error_code(response: axum::response::Response, expected_code: &str) {
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body, json!({ "error": expected_code }));
+}
+
 /// T-03-21/T-05-05 mitigation proof: a submission body carrying client-supplied `author`/
 /// `authorId` fields is accepted, but the row that lands in the database is always attributed to
 /// the JWT-authenticated user — never to the values the client sent.
@@ -279,7 +287,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(not_found_response.status(), StatusCode::NOT_FOUND);
+    assert_error_code(not_found_response, "not-found").await;
 }
 
 /// Regression test (code review CR-01): a puzzle whose `short_key` happens to look numeric must
@@ -487,8 +495,7 @@ async fn download_does_not_increment_counter(pool: PgPool) {
 }
 
 /// D-04/D-05: a `data` value that is neither valid JSON (Community Edition format) nor a valid
-/// lz-string (official `compressX64` format) is rejected with a 400 and creates no row — this
-/// 400 status is temporary until Phase 6's all-200/`T.backendErrors` convention lands.
+/// lz-string (official `compressX64` format) is rejected with `bad-payload` and creates no row.
 #[sqlx::test]
 async fn submit_rejects_undecodable_payload(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -515,7 +522,7 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_error_code(response, "bad-payload").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
         .bind("CpCpCpCp")
@@ -571,4 +578,88 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
     assert_eq!(entry["likes"], 42);
     assert_eq!(entry["downloads"], 7);
     assert_eq!(entry["completions"], 3);
+}
+
+/// D-17/06-VALIDATION.md: sweeps the four error paths visible at this stage of the phase in one
+/// test, proving the all-200 contract holds across handler categories -- not-found (repository),
+/// bad-payload (decode), unauthorized (missing token), bad-token (invalid token). None of the
+/// four responses may have a status other than 200.
+#[sqlx::test]
+async fn error_taxonomy(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "taxonomy-author").await;
+    let token = common::jwt_for(author_id);
+
+    let not_found_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/999999")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(not_found_response, "not-found").await;
+
+    let bad_payload_body = json!({
+        "title": "Taxonomy Undecodable",
+        "shortKey": "TxTxTxTx",
+        "data": "not-valid-lzstring-!!@@##",
+    });
+    let bad_payload_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
+                .body(Body::from(bad_payload_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(bad_payload_response, "bad-payload").await;
+
+    let unauthorized_body = json!({
+        "title": "Taxonomy No Token",
+        "shortKey": "TyTyTyTy",
+        "data": sample_game_data().to_string(),
+    });
+    let unauthorized_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(unauthorized_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(unauthorized_response, "unauthorized").await;
+
+    let bad_token_body = json!({
+        "title": "Taxonomy Bad Token",
+        "shortKey": "TzTzTzTz",
+        "data": sample_game_data().to_string(),
+    });
+    let bad_token_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", "not-a-jwt")
+                .body(Body::from(bad_token_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(bad_token_response, "bad-token").await;
 }
