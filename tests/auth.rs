@@ -20,6 +20,14 @@ async fn body_to_json(response: Response) -> Value {
     serde_json::from_slice(&bytes).expect("response body is valid JSON")
 }
 
+/// D-17: every business/auth rejection answers HTTP 200 with `{ "error": "<code>" }` — this
+/// helper asserts both halves of that contract in one call.
+async fn assert_error_code(response: Response, expected_code: &str) {
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body, json!({ "error": expected_code }));
+}
+
 async fn post_login(app: axum::Router, token: &str, name: &str) -> Response {
     app.oneshot(
         Request::builder()
@@ -104,7 +112,7 @@ async fn protected_route_does_not_call_oracle(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn submit_without_token_is_401(pool: PgPool) {
+async fn submit_without_token_is_rejected(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
@@ -119,7 +127,7 @@ async fn submit_without_token_is_401(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_error_code(response, "unauthorized").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles")
         .fetch_one(&pool)
@@ -152,7 +160,7 @@ async fn submit_rejects_bearer_and_api_key(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(bearer_response.status(), StatusCode::UNAUTHORIZED);
+    assert_error_code(bearer_response, "unauthorized").await;
 
     let api_key_response = app
         .oneshot(
@@ -166,7 +174,7 @@ async fn submit_rejects_bearer_and_api_key(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(api_key_response.status(), StatusCode::UNAUTHORIZED);
+    assert_error_code(api_key_response, "unauthorized").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles")
         .fetch_one(&pool)
@@ -215,6 +223,9 @@ async fn submit_attributes_puzzle_to_jwt_user(pool: PgPool) {
 /// T-05-25: a JWT can be correctly signed and unexpired yet still name a user that no longer (or
 /// never did) exist in `users` — the `puzzles.author_id` foreign key rejects the write, proving a
 /// signed token alone is not sufficient to create data for an arbitrary `sub`.
+///
+/// This is `AppError::Database`, which stays a literal 500 despite the all-200 convention — see
+/// `docs/adr/0003-all-200-error-taxonomy.md`.
 #[sqlx::test]
 async fn submit_with_jwt_of_unknown_user_is_rejected(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -299,7 +310,9 @@ async fn rejects_invalid_oracle_token(pool: PgPool) {
     let app = savez::app(state);
 
     let response = post_login(app, "invalid-token", "refused-player").await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // AppError::OracleVerificationFailed answers 200 + {"error":"unauthorized"} -- the strict
+    // body equality below proves a fortiori that no JWT is ever returned on refusal.
+    assert_error_code(response, "unauthorized").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE name = $1")
         .bind("refused-player")
@@ -307,19 +320,6 @@ async fn rejects_invalid_oracle_token(pool: PgPool) {
         .await
         .expect("count query");
     assert_eq!(count, 0);
-
-    // AppError::OracleVerificationFailed produces a bare 401 with no body -- no JWT anywhere in
-    // the response.
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("collect response body")
-        .to_bytes();
-    assert!(
-        bytes.is_empty(),
-        "no JWT must be returned on refusal, got body: {bytes:?}"
-    );
 }
 
 #[sqlx::test]
@@ -329,8 +329,8 @@ async fn rejects_on_oracle_unreachable(pool: PgPool) {
 
     let response = post_login(app, "any-token", "unreachable-player").await;
     // D-05: a client must not be able to distinguish an explicit refusal from an unreachable
-    // oracle -- same 401 as `rejects_invalid_oracle_token`.
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // oracle -- same code as `rejects_invalid_oracle_token`.
+    assert_error_code(response, "unauthorized").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE name = $1")
         .bind("unreachable-player")
@@ -349,7 +349,7 @@ async fn rejects_duplicate_name(pool: PgPool) {
     assert_eq!(first_response.status(), StatusCode::OK);
 
     let second_response = post_login(savez::app(state), "token-2", "dupe-player").await;
-    assert_eq!(second_response.status(), StatusCode::CONFLICT);
+    assert_error_code(second_response, "name-already-taken").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE name = $1")
         .bind("dupe-player")
@@ -366,7 +366,7 @@ async fn rejects_invalid_name_without_calling_oracle(pool: PgPool) {
     let app = savez::app(state);
 
     let response = post_login(app, "any-token", "a b").await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_error_code(response, "bad-payload").await;
     // The `.expect(0)` set on the mock is verified when `server` is dropped: no oracle call was
     // ever made for an invalid name.
 }
@@ -409,6 +409,9 @@ async fn login_never_creates_an_admin_role(pool: PgPool) {
 /// D-08/SC4: no route anywhere in the router creates an administrator. These three paths are
 /// unregistered in `src/lib.rs`'s `Router::new()` — axum's default fallback answers 404 for any
 /// unmatched route, which is itself the proof: there is no public surface to even attempt.
+///
+/// This 404 comes from axum's router, never from `AppError`, so it stays outside the all-200
+/// convention (`docs/adr/0003-all-200-error-taxonomy.md`).
 #[sqlx::test]
 async fn no_public_admin_creation_route(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -446,7 +449,7 @@ async fn admin_name_is_reserved_by_seed(pool: PgPool) {
     let app = savez::app(state);
 
     let response = post_login(app, "valid-token", "admin").await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_error_code(response, "name-already-taken").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE name = $1")
         .bind("admin")
@@ -460,14 +463,14 @@ async fn admin_name_is_reserved_by_seed(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn non_oracle_auth_mode_returns_not_implemented(pool: PgPool) {
+async fn non_oracle_auth_mode_is_rejected(pool: PgPool) {
     let server = mock_oracle_ok(0).await;
     let mut state = common::test_state_with_oracle(pool.clone(), &server.uri());
     state.auth_mode = savez::config::AuthMode::Open;
     let app = savez::app(state);
 
     let response = post_login(app, "any-token", "irrelevant-name").await;
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_error_code(response, "auth-mode-not-implemented").await;
     // The `.expect(0)` set on the mock is verified when `server` is dropped: no oracle call was
     // ever made for a non-oracle auth mode.
 }
