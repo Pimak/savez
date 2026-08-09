@@ -49,16 +49,33 @@ pub async fn insert_puzzle(
 /// mandatory because `created_at DEFAULT now()` is the transaction start time and can collide
 /// for two puzzles inserted in quick succession, which would otherwise make "newest first"
 /// non-deterministic.
-pub async fn list_new(pool: &PgPool) -> Result<Vec<PuzzleMetadata>, AppError> {
+///
+/// `current_user_id` is a NAKED `Uuid`, never `Option<Uuid>`: D-05 makes the caller (`routes::
+/// puzzles::list`, `"new"` arm) mandatorily authenticated — there is no anonymous path left that
+/// could call this function without a real user id.
+///
+/// Visibility predicate (docs/adr/0002-hidden-by-tri-state.md): keeps `WHERE p.hidden_at IS NULL`
+/// unconditionally, even for the puzzle's own author. Unlike `find_puzzle_by_id`/
+/// `find_puzzle_by_short_key`/`list_mine`, this is the "New" catalog view — an author who just hid
+/// their own puzzle must NOT keep seeing it here, or they would reasonably conclude the hide
+/// action silently failed. Author-side visibility of a hidden puzzle is preserved elsewhere
+/// (direct download, `list_mine`), never in this listing.
+pub async fn list_new(
+    pool: &PgPool,
+    current_user_id: Uuid,
+) -> Result<Vec<PuzzleMetadata>, AppError> {
     let rows = sqlx::query!(
         r#"
         SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
-               p.average_time, p.title, u.name AS author
+               p.average_time, p.title, u.name AS author,
+               (pc.user_id IS NOT NULL) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
         WHERE p.hidden_at IS NULL
         ORDER BY p.created_at DESC, p.id DESC
-        "#
+        "#,
+        current_user_id
     )
     .fetch_all(pool)
     .await?;
@@ -77,23 +94,139 @@ pub async fn list_new(pool: &PgPool) -> Result<Vec<PuzzleMetadata>, AppError> {
             average_time: row.average_time,
             title: row.title,
             author: row.author,
-            completed: false, // D-07: no current user before Phase 5, always false
+            completed: row.completed, // computed by the LEFT JOIN above, relative to $1
+        })
+        .collect())
+}
+
+/// Newest-first puzzle listing scoped to a single author (D-13: `GET /v1/puzzles/list/mine`).
+/// Same projection/mapping/tie-break ordering as `list_new`.
+///
+/// Visibility predicate: `WHERE p.author_id = $1` carries NO `hidden_at` exclusion whatsoever —
+/// this is the deliberate limit case of the visibility rule (D-10 + D-13), not an exception to
+/// it: an author always sees their own puzzles, hidden or not, via `mine`. See
+/// docs/adr/0002-hidden-by-tri-state.md.
+pub async fn list_mine(
+    pool: &PgPool,
+    current_user_id: Uuid,
+) -> Result<Vec<PuzzleMetadata>, AppError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
+               p.average_time, p.title, u.name AS author,
+               (pc.user_id IS NOT NULL) AS "completed!"
+        FROM puzzles p
+        JOIN users u ON u.id = p.author_id
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        WHERE p.author_id = $1
+        ORDER BY p.created_at DESC, p.id DESC
+        "#,
+        current_user_id
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PuzzleMetadata {
+            id: row.id as u32,
+            short_key: row.short_key,
+            likes: row.likes as u32,
+            downloads: row.downloads as u32,
+            completions: row.completions as u32,
+            difficulty: row.difficulty,
+            average_time: row.average_time,
+            title: row.title,
+            author: row.author,
+            completed: row.completed,
+        })
+        .collect())
+}
+
+/// Title-substring search (`POST /v1/puzzles/search`, D-05/interfaces): filters on `p.title
+/// ILIKE '%<search_term>%'` only — `difficulty`/`duration` are validated upstream
+/// (`validation::validate_search_filters`) but do not contribute to any `WHERE` clause yet
+/// (Phase 6 -> Phase 7 seam documented in `routes::puzzles::search`, since the columns they'd
+/// filter on are never populated before Phase 7).
+///
+/// `search_term` is escaped by the CALLER before this function ever binds it (`\` -> `\\`,
+/// `%` -> `\%`, `_` -> `\_`) so a literal `%`/`_` typed by a user is matched literally rather than
+/// interpreted as an `ILIKE` wildcard — Postgres's default `LIKE`/`ILIKE` escape character is `\`.
+/// This is not an injection concern (the query is parameterized and compile-time checked by
+/// `sqlx::query!`); it is purely about match correctness and avoiding a degenerate wildcard
+/// pattern.
+///
+/// Visibility predicate: `WHERE p.hidden_at IS NULL` unconditionally, same rationale as
+/// `list_new` — search is a catalog view, not a direct-access or "mine" view.
+pub async fn search_puzzles(
+    pool: &PgPool,
+    current_user_id: Uuid,
+    search_term: &str,
+) -> Result<Vec<PuzzleMetadata>, AppError> {
+    let escaped_term = search_term
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
+               p.average_time, p.title, u.name AS author,
+               (pc.user_id IS NOT NULL) AS "completed!"
+        FROM puzzles p
+        JOIN users u ON u.id = p.author_id
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        WHERE p.hidden_at IS NULL AND p.title ILIKE '%' || $2 || '%'
+        ORDER BY p.created_at DESC, p.id DESC
+        "#,
+        current_user_id,
+        escaped_term
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PuzzleMetadata {
+            id: row.id as u32,
+            short_key: row.short_key,
+            likes: row.likes as u32,
+            downloads: row.downloads as u32,
+            completions: row.completions as u32,
+            difficulty: row.difficulty,
+            average_time: row.average_time,
+            title: row.title,
+            author: row.author,
+            completed: row.completed,
         })
         .collect())
 }
 
 /// Resolves a puzzle by numeric `id`. Does NOT increment `puzzles.downloads` — D-06 defers all
 /// counters (likes/downloads/completions) to Phase 7, where they arrive together.
-pub async fn find_puzzle_by_id(pool: &PgPool, id: i32) -> Result<Option<PuzzleFullData>, AppError> {
+///
+/// Visibility predicate: `WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.id = $2` — a
+/// direct-access lookup (unlike `list_new`/`search_puzzles`'s catalog views) additionally admits a
+/// puzzle hidden by ITS OWN author (D-10): the author can still `download` something they hid,
+/// anyone else gets the same `not-found` as a nonexistent puzzle. See
+/// docs/adr/0002-hidden-by-tri-state.md.
+pub async fn find_puzzle_by_id(
+    pool: &PgPool,
+    current_user_id: Uuid,
+    id: i32,
+) -> Result<Option<PuzzleFullData>, AppError> {
     let row = sqlx::query!(
         r#"
         SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
                p.average_time, p.title, u.name AS author,
-               p.data as "data: Json<PuzzleGameData>"
+               p.data as "data: Json<PuzzleGameData>",
+               (pc.user_id IS NOT NULL) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
-        WHERE p.hidden_at IS NULL AND p.id = $1
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.id = $2
         "#,
+        current_user_id,
         id
     )
     .fetch_optional(pool)
@@ -110,7 +243,7 @@ pub async fn find_puzzle_by_id(pool: &PgPool, id: i32) -> Result<Option<PuzzleFu
             average_time: row.average_time,
             title: row.title,
             author: row.author,
-            completed: false, // D-07
+            completed: row.completed,
         },
         game: row.data.0,
     }))
@@ -153,20 +286,25 @@ pub async fn insert_user(pool: &PgPool, name: &str, verified_via: &str) -> Resul
 }
 
 /// Resolves a puzzle by `short_key`. Same non-incrementing behavior as `find_puzzle_by_id`
-/// (D-06) — see that function's doc comment.
+/// (D-06) and the SAME visibility predicate/rationale (D-10, docs/adr/0002-hidden-by-tri-state.md)
+/// — see that function's doc comment.
 pub async fn find_puzzle_by_short_key(
     pool: &PgPool,
+    current_user_id: Uuid,
     short_key: &str,
 ) -> Result<Option<PuzzleFullData>, AppError> {
     let row = sqlx::query!(
         r#"
         SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
                p.average_time, p.title, u.name AS author,
-               p.data as "data: Json<PuzzleGameData>"
+               p.data as "data: Json<PuzzleGameData>",
+               (pc.user_id IS NOT NULL) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
-        WHERE p.hidden_at IS NULL AND p.short_key = $1
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.short_key = $2
         "#,
+        current_user_id,
         short_key
     )
     .fetch_optional(pool)
@@ -183,7 +321,7 @@ pub async fn find_puzzle_by_short_key(
             average_time: row.average_time,
             title: row.title,
             author: row.author,
-            completed: false, // D-07
+            completed: row.completed,
         },
         game: row.data.0,
     }))

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,\n               p.average_time, p.title, u.name AS author,\n               p.data as \"data: Json<PuzzleGameData>\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        WHERE p.hidden_at IS NULL AND p.id = $1\n        ",
+  "query": "\n        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,\n               p.average_time, p.title, u.name AS author,\n               (pc.user_id IS NOT NULL) AS \"completed!\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1\n        WHERE p.hidden_at IS NULL AND p.title ILIKE '%' || $2 || '%'\n        ORDER BY p.created_at DESC, p.id DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -104,19 +104,15 @@
       },
       {
         "ordinal": 9,
-        "name": "data: Json<PuzzleGameData>",
-        "type_info": "Jsonb",
-        "origin": {
-          "Table": {
-            "table": "puzzles",
-            "name": "data"
-          }
-        }
+        "name": "completed!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
@@ -129,8 +125,8 @@
       true,
       false,
       false,
-      false
+      null
     ]
   },
-  "hash": "067acefce5080d6bb89cfe7f62f620b2cd146945150fb621f37be2e32c52762e"
+  "hash": "e31b184ac901deac4f620b74daee87d7b0b1d09c7ebcea5e152a0f275adacc45"
 }

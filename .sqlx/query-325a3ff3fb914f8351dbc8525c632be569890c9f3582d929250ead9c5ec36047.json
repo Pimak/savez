@@ -1,0 +1,131 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,\n               p.average_time, p.title, u.name AS author,\n               (pc.user_id IS NOT NULL) AS \"completed!\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1\n        WHERE p.hidden_at IS NULL\n        ORDER BY p.created_at DESC, p.id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "short_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "short_key"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "likes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "likes"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "downloads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "downloads"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "completions",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "completions"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "difficulty",
+        "type_info": "Float4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "difficulty"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "average_time",
+        "type_info": "Float4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "average_time"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "author",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "completed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "325a3ff3fb914f8351dbc8525c632be569890c9f3582d929250ead9c5ec36047"
+}
