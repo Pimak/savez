@@ -1216,6 +1216,504 @@ async fn search_filters_by_title(pool: PgPool) {
     );
 }
 
+/// Issues a `POST /v1/puzzles/complete/:id` request.
+async fn complete_request(
+    app: axum::Router,
+    token: Option<&str>,
+    id: &str,
+    time: f32,
+    liked: bool,
+) -> axum::response::Response {
+    let body = json!({ "time": time, "liked": liked });
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/puzzles/complete/{id}"))
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.header("x-token", token);
+    }
+    app.oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
+}
+
+/// Issues a `POST /v1/puzzles/report/:id` request.
+async fn report_request(
+    app: axum::Router,
+    token: Option<&str>,
+    id: &str,
+    reason: &str,
+) -> axum::response::Response {
+    let body = json!({ "reason": reason });
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/puzzles/report/{id}"))
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.header("x-token", token);
+    }
+    app.oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
+}
+
+/// Issues a `POST /v1/puzzles/delete/:id` request. No body at all -- the real client sends a
+/// literal `{}`, and the handler declares no `Json` extractor, so an entirely empty body must
+/// succeed identically.
+async fn delete_request(
+    app: axum::Router,
+    token: Option<&str>,
+    id: &str,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/puzzles/delete/{id}"));
+    if let Some(token) = token {
+        builder = builder.header("x-token", token);
+    }
+    app.oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+/// D-02: rejoue LITTÉRALEMENT le scénario de référence -- 60s/`liked=false` puis 90s/`liked=true`
+/// sur le même puzzle et le même utilisateur laisse `time_taken=60`, `liked=true`, une seule ligne.
+/// Le cas symétrique (90 puis 60) confirme que `time_taken` ne se dégrade jamais dans les deux
+/// sens. Vérifie aussi la frontière D-01 : les compteurs agrégés de `puzzles` restent inchangés
+/// après les deux appels -- ce test devra être révisé quand la Phase 7 commencera à les alimenter.
+#[sqlx::test]
+async fn completion_upsert_semantics(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "completion-author").await;
+    let token = common::jwt_for(author_id);
+
+    // Scenario 1 (reference, D-02): 60 then 90, liked flips false -> true.
+    let submitted_1 = submit_puzzle(app.clone(), &token, "CwCwCwCw", "Completion One").await;
+    let puzzle_id_1 = submitted_1["id"]
+        .as_i64()
+        .expect("submitted id is a number");
+
+    let first_call = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id_1.to_string(),
+        60.0,
+        false,
+    )
+    .await;
+    assert_eq!(first_call.status(), StatusCode::OK);
+    let second_call = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id_1.to_string(),
+        90.0,
+        true,
+    )
+    .await;
+    assert_eq!(second_call.status(), StatusCode::OK);
+
+    let row_1: (f32, bool) = sqlx::query_as(
+        "SELECT time_taken, liked FROM puzzle_completions WHERE user_id = $1 AND puzzle_id = $2",
+    )
+    .bind(author_id)
+    .bind(puzzle_id_1 as i32)
+    .fetch_one(&pool)
+    .await
+    .expect("completion row must exist");
+    assert_eq!(
+        row_1.0, 60.0,
+        "time_taken must stay at the best (lowest) value"
+    );
+    assert!(
+        row_1.1,
+        "liked must be overwritten by the latest value sent"
+    );
+
+    let count_1: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM puzzle_completions WHERE user_id = $1 AND puzzle_id = $2",
+    )
+    .bind(author_id)
+    .bind(puzzle_id_1 as i32)
+    .fetch_one(&pool)
+    .await
+    .expect("count query must succeed");
+    assert_eq!(
+        count_1, 1,
+        "re-completion must upsert, not insert a second row"
+    );
+
+    // Scenario 2 (symmetric): 90 then 60 -> time_taken stays at the min, 60.
+    let submitted_2 = submit_puzzle(app.clone(), &token, "SpSpSpSp", "Completion Two").await;
+    let puzzle_id_2 = submitted_2["id"]
+        .as_i64()
+        .expect("submitted id is a number");
+
+    let third_call = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id_2.to_string(),
+        90.0,
+        false,
+    )
+    .await;
+    assert_eq!(third_call.status(), StatusCode::OK);
+    let fourth_call = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id_2.to_string(),
+        60.0,
+        true,
+    )
+    .await;
+    assert_eq!(fourth_call.status(), StatusCode::OK);
+
+    let row_2: (f32, bool) = sqlx::query_as(
+        "SELECT time_taken, liked FROM puzzle_completions WHERE user_id = $1 AND puzzle_id = $2",
+    )
+    .bind(author_id)
+    .bind(puzzle_id_2 as i32)
+    .fetch_one(&pool)
+    .await
+    .expect("completion row must exist");
+    assert_eq!(
+        row_2.0, 60.0,
+        "time_taken must land on the lower of the two replays"
+    );
+
+    // D-01 boundary: no completion call ever touches puzzles' aggregate counters.
+    // TODO(Phase 7): this assertion must be revisited once REQ-business-logic starts maintaining
+    // these columns from the completion event.
+    let aggregates: (i32, i32, Option<f32>) =
+        sqlx::query_as("SELECT completions, likes, average_time FROM puzzles WHERE id = $1")
+            .bind(puzzle_id_1 as i32)
+            .fetch_one(&pool)
+            .await
+            .expect("puzzle row must exist");
+    assert_eq!(aggregates, (0, 0, None));
+}
+
+/// D-01/D-02: `:id` non numérique, puzzle inexistant, `time` nul ou négatif, absence de jeton --
+/// chaque cas est refusé avec son code exact et ne laisse jamais de ligne dans `puzzle_completions`.
+#[sqlx::test]
+async fn complete_rejects_bad_input(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "complete-reject-author").await;
+    let token = common::jwt_for(author_id);
+
+    let submitted = submit_puzzle(app.clone(), &token, "RyRyRyRy", "Reject Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    let bad_id_response = complete_request(app.clone(), Some(&token), "abc", 60.0, false).await;
+    assert_error_code(bad_id_response, "bad-id").await;
+
+    let not_found_response =
+        complete_request(app.clone(), Some(&token), "999999", 60.0, false).await;
+    assert_error_code(not_found_response, "not-found").await;
+
+    let zero_time_response = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id.to_string(),
+        0.0,
+        false,
+    )
+    .await;
+    assert_error_code(zero_time_response, "bad-payload").await;
+
+    let negative_time_response = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id.to_string(),
+        -10.0,
+        false,
+    )
+    .await;
+    assert_error_code(negative_time_response, "bad-payload").await;
+
+    let unauthorized_response =
+        complete_request(app.clone(), None, &puzzle_id.to_string(), 60.0, false).await;
+    assert_error_code(unauthorized_response, "unauthorized").await;
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzle_completions")
+        .fetch_one(&pool)
+        .await
+        .expect("count query must succeed");
+    assert_eq!(count, 0, "no rejected completion attempt must leave a row");
+}
+
+/// D-03/D-04: double signalement et auto-signalement refusés, `reason` hors énumération refusé,
+/// puzzle inexistant refusé, absence de jeton refusée -- chacun avec son code exact.
+#[sqlx::test]
+async fn report_rules(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_a = common::register_test_user(&pool, "report-author-a").await;
+    let user_b = common::register_test_user(&pool, "report-user-b").await;
+    let token_a = common::jwt_for(author_a);
+    let token_b = common::jwt_for(user_b);
+
+    let submitted = submit_puzzle(app.clone(), &token_a, "WgWgWgWg", "Report Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    let success_response = report_request(
+        app.clone(),
+        Some(&token_b),
+        &puzzle_id.to_string(),
+        "profane",
+    )
+    .await;
+    assert_eq!(success_response.status(), StatusCode::OK);
+    let success_body = body_to_json(success_response).await;
+    assert_eq!(success_body, json!({ "success": true }));
+
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM puzzle_reports WHERE user_id = $1 AND puzzle_id = $2",
+    )
+    .bind(user_b)
+    .bind(puzzle_id as i32)
+    .fetch_one(&pool)
+    .await
+    .expect("report row must exist");
+    assert_eq!(status, "pending");
+
+    // D-03: double report by the same user is refused, still exactly one row.
+    let duplicate_response = report_request(
+        app.clone(),
+        Some(&token_b),
+        &puzzle_id.to_string(),
+        "profane",
+    )
+    .await;
+    assert_error_code(duplicate_response, "bad-payload").await;
+
+    let count_after_duplicate: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM puzzle_reports WHERE user_id = $1 AND puzzle_id = $2",
+    )
+    .bind(user_b)
+    .bind(puzzle_id as i32)
+    .fetch_one(&pool)
+    .await
+    .expect("count query must succeed");
+    assert_eq!(count_after_duplicate, 1);
+
+    // D-03: self-report is refused, still exactly one row total on this puzzle.
+    let self_report_response = report_request(
+        app.clone(),
+        Some(&token_a),
+        &puzzle_id.to_string(),
+        "profane",
+    )
+    .await;
+    assert_error_code(self_report_response, "can-not-report-your-own-puzzle").await;
+
+    let total_after_self_report: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM puzzle_reports WHERE puzzle_id = $1")
+            .bind(puzzle_id as i32)
+            .fetch_one(&pool)
+            .await
+            .expect("count query must succeed");
+    assert_eq!(total_after_self_report, 1);
+
+    // D-04: an out-of-enum reason is refused before any write is attempted.
+    let bad_reason_response =
+        report_request(app.clone(), Some(&token_b), &puzzle_id.to_string(), "spam").await;
+    assert_error_code(bad_reason_response, "bad-payload").await;
+
+    let not_found_response = report_request(app.clone(), Some(&token_b), "999999", "profane").await;
+    assert_error_code(not_found_response, "not-found").await;
+
+    let unauthorized_response =
+        report_request(app.clone(), None, &puzzle_id.to_string(), "profane").await;
+    assert_error_code(unauthorized_response, "unauthorized").await;
+}
+
+/// D-08/D-09/D-11/D-12: `delete/:id` est réservé à l'auteur (`no-permission` pour un tiers,
+/// distinct de `not-found`), `:id` non numérique refusé (`bad-id`), la ligne `puzzles` n'est
+/// jamais détruite (D-08), `hidden_by` porte toujours l'`id` de l'auteur -- jamais `NULL` (D-09,
+/// ADR 0002) -- et une seconde suppression par le même auteur réussit encore (idempotence).
+#[sqlx::test]
+async fn delete_author_only(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_a = common::register_test_user(&pool, "delete-author-a").await;
+    let user_b = common::register_test_user(&pool, "delete-user-b").await;
+    let token_a = common::jwt_for(author_a);
+    let token_b = common::jwt_for(user_b);
+
+    let submitted = submit_puzzle(app.clone(), &token_a, "WbWbWbWb", "Delete Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    // D-12: a non-author gets no-permission, and the row stays unhidden.
+    let forbidden_response =
+        delete_request(app.clone(), Some(&token_b), &puzzle_id.to_string()).await;
+    assert_error_code(forbidden_response, "no-permission").await;
+
+    let hidden_after_forbidden: bool =
+        sqlx::query_scalar("SELECT hidden_at IS NOT NULL FROM puzzles WHERE id = $1")
+            .bind(puzzle_id as i32)
+            .fetch_one(&pool)
+            .await
+            .expect("puzzle row must exist");
+    assert!(
+        !hidden_after_forbidden,
+        "a non-author's rejected delete must not hide the puzzle"
+    );
+
+    let not_found_response = delete_request(app.clone(), Some(&token_a), "999999").await;
+    assert_error_code(not_found_response, "not-found").await;
+
+    let bad_id_response = delete_request(app.clone(), Some(&token_a), "abc").await;
+    assert_error_code(bad_id_response, "bad-id").await;
+
+    let success_response =
+        delete_request(app.clone(), Some(&token_a), &puzzle_id.to_string()).await;
+    assert_eq!(success_response.status(), StatusCode::OK);
+    let success_body = body_to_json(success_response).await;
+    assert_eq!(success_body, json!({ "success": true }));
+
+    let (is_hidden, hidden_by): (bool, Option<uuid::Uuid>) =
+        sqlx::query_as("SELECT hidden_at IS NOT NULL, hidden_by FROM puzzles WHERE id = $1")
+            .bind(puzzle_id as i32)
+            .fetch_one(&pool)
+            .await
+            .expect("puzzle row must exist");
+    assert!(is_hidden, "successful delete must set hidden_at");
+    assert_eq!(
+        hidden_by,
+        Some(author_a),
+        "hidden_by must be the author's own id, never NULL (D-09/ADR 0002)"
+    );
+
+    let still_exists: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE id = $1")
+        .bind(puzzle_id as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("count query must succeed");
+    assert_eq!(
+        still_exists, 1,
+        "D-08: the row must never be physically deleted"
+    );
+
+    // Idempotence (Pattern 4): a second delete by the same author still succeeds.
+    let second_delete_response =
+        delete_request(app.clone(), Some(&token_a), &puzzle_id.to_string()).await;
+    assert_eq!(second_delete_response.status(), StatusCode::OK);
+    let second_delete_body = body_to_json(second_delete_response).await;
+    assert_eq!(second_delete_body, json!({ "success": true }));
+}
+
+/// D-10/D-13: après suppression par l'auteur, le puzzle disparaît de `list/new` pour tout le
+/// monde (y compris l'auteur), reste visible via `list/mine` de l'auteur, se télécharge encore
+/// pour l'auteur mais pas pour un tiers, ne peut plus être complété par un tiers, et n'apparaît
+/// plus dans `search`.
+#[sqlx::test]
+async fn deleted_puzzle_disappears_from_catalog_but_not_for_author(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_a = common::register_test_user(&pool, "vanish-author-a").await;
+    let user_b = common::register_test_user(&pool, "vanish-user-b").await;
+    let token_a = common::jwt_for(author_a);
+    let token_b = common::jwt_for(user_b);
+
+    let submitted = submit_puzzle(app.clone(), &token_a, "WcWcWcWc", "Vanishing Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    let delete_response = delete_request(app.clone(), Some(&token_a), &puzzle_id.to_string()).await;
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    for token in [&token_a, &token_b] {
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/puzzles/list/new")
+                    .header("x-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = body_to_json(list_response).await;
+        let list = list_body.as_array().expect("list/new returns a JSON array");
+        assert!(
+            !list.iter().any(|p| p["shortKey"] == "WcWcWcWc"),
+            "list/new must never show a puzzle hidden by its own author"
+        );
+    }
+
+    let mine_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/mine")
+                .header("x-token", &token_a)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mine_body = body_to_json(mine_response).await;
+    let mine_list = mine_body
+        .as_array()
+        .expect("list/mine returns a JSON array");
+    assert!(
+        mine_list.iter().any(|p| p["shortKey"] == "WcWcWcWc"),
+        "list/mine must still show the author's own hidden puzzle"
+    );
+
+    let download_by_author = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/WcWcWcWc")
+                .header("x-token", &token_a)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(download_by_author.status(), StatusCode::OK);
+
+    let download_by_stranger = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/WcWcWcWc")
+                .header("x-token", &token_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(download_by_stranger, "not-found").await;
+
+    let complete_by_stranger = complete_request(
+        app.clone(),
+        Some(&token_b),
+        &puzzle_id.to_string(),
+        30.0,
+        false,
+    )
+    .await;
+    assert_error_code(complete_by_stranger, "not-found").await;
+
+    let search_response =
+        search_request(app.clone(), Some(&token_a), "Vanishing", "any", "any").await;
+    let search_body = body_to_json(search_response).await;
+    let search_list = search_body.as_array().expect("search returns a JSON array");
+    assert!(
+        !search_list.iter().any(|p| p["shortKey"] == "WcWcWcWc"),
+        "search must never surface a hidden puzzle"
+    );
+}
+
 /// D-05/T-06-13: `search` rejects unknown `difficulty`/`duration` values and an oversized
 /// `searchTerm` with `bad-payload`; `list` rejects an unrecognized category with `bad-category`;
 /// `top-rated` stays a recognized category answering `200 []`, never an error.

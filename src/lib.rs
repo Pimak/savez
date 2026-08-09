@@ -31,10 +31,7 @@ pub fn app(state: db::AppState) -> Router {
             get(routes::puzzles::download),
         )
         .route("/v1/puzzles/search", post(routes::puzzles::search))
-        .route(
-            "/v1/puzzles/complete/{id}",
-            post(routes::puzzles::complete),
-        )
+        .route("/v1/puzzles/complete/{id}", post(routes::puzzles::complete))
         .route("/v1/puzzles/report/{id}", post(routes::puzzles::report))
         .route("/v1/puzzles/delete/{id}", post(routes::puzzles::delete))
         .layer(cors)
