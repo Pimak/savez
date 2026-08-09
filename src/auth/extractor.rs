@@ -3,6 +3,7 @@
 //! `x-api-key` (that header identifies the calling APPLICATION on real client requests, not the
 //! user — reading it here would be an authentication bypass). See 05-RESEARCH.md Pattern 3.
 
+use axum::Json;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
@@ -18,28 +19,37 @@ pub struct AuthUser {
     pub user_id: Uuid,
 }
 
-/// TODO(Phase 6): the project-wide `T.backendErrors` taxonomy (DEC-api-contract-conventions)
-/// replaces this bare `401` with `{ "error": "unauthorized" }` / `{ "error": "bad-token" }` —
-/// same temporary-mapping regime as `src/error.rs::AppError` until Phase 6 lands.
+/// Converges on the same wire format as `src/error.rs::AppError` (D-17): every rejection answers
+/// HTTP 200 with `{ "error": "<code>" }`, never a bare 401 — see
+/// `docs/adr/0003-all-200-error-taxonomy.md`.
 #[derive(Debug)]
 pub enum AuthRejection {
     MissingToken,
     InvalidToken,
 }
 
+impl AuthRejection {
+    fn code(&self) -> &'static str {
+        match self {
+            AuthRejection::MissingToken => "unauthorized",
+            AuthRejection::InvalidToken => "bad-token",
+        }
+    }
+}
+
 impl IntoResponse for AuthRejection {
     fn into_response(self) -> Response {
+        let code = self.code();
         match self {
             AuthRejection::MissingToken => {
                 tracing::warn!("rejected request: no auth token presented");
-                StatusCode::UNAUTHORIZED.into_response()
             }
             AuthRejection::InvalidToken => {
                 // T-05-26: never log the token value itself, only the fact that it failed.
                 tracing::warn!("rejected request: auth token failed validation");
-                StatusCode::UNAUTHORIZED.into_response()
             }
         }
+        (StatusCode::OK, Json(serde_json::json!({ "error": code }))).into_response()
     }
 }
 
@@ -202,5 +212,36 @@ mod tests {
             authenticate_headers(&headers, TEST_KEY),
             Err(AuthRejection::InvalidToken)
         ));
+    }
+
+    /// D-17: both rejection variants converge on the same wire format as `AppError` — HTTP 200,
+    /// never a bare 401, body `{ "error": "<code>" }`.
+    #[tokio::test]
+    async fn rejections_respond_200_with_error_code() {
+        use http_body_util::BodyExt;
+
+        async fn body_to_json(response: Response) -> serde_json::Value {
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("collect response body")
+                .to_bytes();
+            serde_json::from_slice(&bytes).expect("response body is valid JSON")
+        }
+
+        let response = AuthRejection::MissingToken.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_to_json(response).await,
+            serde_json::json!({ "error": "unauthorized" })
+        );
+
+        let response = AuthRejection::InvalidToken.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_to_json(response).await,
+            serde_json::json!({ "error": "bad-token" })
+        );
     }
 }
