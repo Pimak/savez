@@ -171,7 +171,7 @@ async fn submit_persists_puzzle(pool: PgPool) {
 
     let body = json!({
         "title": "Test Puzzle",
-        "shortKey": "submit-persists-1",
+        "shortKey": "CuCuCuCu",
         "data": sample_game_data().to_string(),
         "author": "attaquant",
         "authorId": "11111111-1111-1111-1111-111111111111",
@@ -193,7 +193,7 @@ async fn submit_persists_puzzle(pool: PgPool) {
 
     let row: (String, String) =
         sqlx::query_as("SELECT title, author_id::text FROM puzzles WHERE short_key = $1")
-            .bind("submit-persists-1")
+            .bind("CuCuCuCu")
             .fetch_one(&pool)
             .await
             .expect("submitted puzzle row must exist");
@@ -213,7 +213,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
 
     let submit_body = json!({
         "title": "Download Test Puzzle",
-        "shortKey": "download-both-1",
+        "shortKey": "RuRuRuRu",
         "data": sample_game_data().to_string(),
     });
 
@@ -253,7 +253,7 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/v1/puzzles/download/download-both-1")
+                .uri("/v1/puzzles/download/RuRuRuRu")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -282,6 +282,11 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
 /// Regression test (code review CR-01): a puzzle whose `short_key` happens to look numeric must
 /// still resolve to itself, not to a different puzzle that happens to share that numeric `id`.
 /// `short_key` lookup must take priority over a coincidental numeric parse of `id_or_key`.
+///
+/// The shape-key grammar (D-14) admits no digits, so a numeric `short_key` can no longer reach the
+/// database through `submit` once Phase 6's validation lands. The regression this test guards
+/// against lives in `download`'s resolution order, not in `submit`, so the second row is inserted
+/// directly, bypassing the API and its validation entirely.
 #[sqlx::test]
 async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -291,15 +296,25 @@ async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) 
     let token = common::jwt_for(author_id);
 
     // First puzzle: whatever numeric `id` the DB assigns it (e.g. 1).
-    let decoy = submit_puzzle(app.clone(), &token, "decoy-puzzle", "Decoy").await;
+    let decoy = submit_puzzle(app.clone(), &token, "SuSuSuSu", "Decoy").await;
     let decoy_id = decoy["id"].as_u64().expect("decoy id is a number");
 
-    // Second puzzle: its `short_key` is literally the decoy's numeric id as a string.
+    // Second puzzle: its `short_key` is literally the decoy's numeric id as a string. Inserted
+    // directly via `query_scalar` (not the `query!` macro, matching `common::register_test_user`)
+    // so this test-only write does not grow the versioned `.sqlx` offline cache.
     let numeric_key = decoy_id.to_string();
-    let target = submit_puzzle(app.clone(), &token, &numeric_key, "Numeric ShortKey Puzzle").await;
-    let target_id = target["id"].as_u64().expect("target id is a number");
+    let target_id: i32 = sqlx::query_scalar(
+        "INSERT INTO puzzles (short_key, title, author_id, data) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(&numeric_key)
+    .bind("Numeric Key Puzzle")
+    .bind(author_id)
+    .bind(sqlx::types::Json(sample_game_data()))
+    .fetch_one(&pool)
+    .await
+    .expect("direct insert of numeric-short_key puzzle must succeed");
     assert_ne!(
-        decoy_id, target_id,
+        decoy_id as i32, target_id,
         "test setup requires two distinct puzzle ids"
     );
 
@@ -317,7 +332,7 @@ async fn download_resolves_numeric_short_key_over_coincidental_id(pool: PgPool) 
 
     assert_eq!(
         body["meta"]["id"].as_u64(),
-        Some(target_id),
+        Some(target_id as u64),
         "download/{numeric_key} must resolve by short_key match, not by coincidentally parsing \
          as the decoy puzzle's numeric id"
     );
@@ -357,8 +372,8 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
     let author_id = common::register_test_user(&pool, "test-author").await;
     let token = common::jwt_for(author_id);
 
-    submit_puzzle(app.clone(), &token, "list-new-first", "First Puzzle").await;
-    submit_puzzle(app.clone(), &token, "list-new-second", "Second Puzzle").await;
+    submit_puzzle(app.clone(), &token, "CrCrCrCr", "First Puzzle").await;
+    submit_puzzle(app.clone(), &token, "CgCgCgCg", "Second Puzzle").await;
 
     let response = app
         .oneshot(
@@ -373,8 +388,8 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
     let body = body_to_json(response).await;
     let list = body.as_array().expect("list/new returns a JSON array");
     assert_eq!(list.len(), 2);
-    assert_eq!(list[0]["shortKey"], "list-new-second");
-    assert_eq!(list[1]["shortKey"], "list-new-first");
+    assert_eq!(list[0]["shortKey"], "CgCgCgCg");
+    assert_eq!(list[1]["shortKey"], "CrCrCrCr");
     assert_eq!(list[0]["author"], "test-author");
     assert_eq!(list[1]["author"], "test-author");
 }
@@ -389,7 +404,7 @@ async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
     let author_id = common::register_test_user(&pool, "test-author").await;
     let token = common::jwt_for(author_id);
 
-    submit_puzzle(app.clone(), &token, "list-empty-1", "Some Puzzle").await;
+    submit_puzzle(app.clone(), &token, "CbCbCbCb", "Some Puzzle").await;
 
     for category in ["top-rated", "mine"] {
         let response = app
@@ -421,14 +436,14 @@ async fn download_does_not_increment_counter(pool: PgPool) {
     let author_id = common::register_test_user(&pool, "test-author").await;
     let token = common::jwt_for(author_id);
 
-    submit_puzzle(app.clone(), &token, "download-counter-1", "Counter Puzzle").await;
+    submit_puzzle(app.clone(), &token, "CyCyCyCy", "Counter Puzzle").await;
 
     for _ in 0..2 {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/v1/puzzles/download/download-counter-1")
+                    .uri("/v1/puzzles/download/CyCyCyCy")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -450,13 +465,13 @@ async fn download_does_not_increment_counter(pool: PgPool) {
     let list = body.as_array().expect("list/new returns a JSON array");
     let entry = list
         .iter()
-        .find(|p| p["shortKey"] == "download-counter-1")
+        .find(|p| p["shortKey"] == "CyCyCyCy")
         .expect("submitted puzzle present in list/new");
     assert_eq!(entry["downloads"], 0);
     assert_eq!(entry["completed"], false);
 
     let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
-        .bind("download-counter-1")
+        .bind("CyCyCyCy")
         .fetch_one(&pool)
         .await
         .expect("puzzle row must exist");
@@ -476,7 +491,7 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
 
     let body = json!({
         "title": "Undecodable Puzzle",
-        "shortKey": "undecodable-1",
+        "shortKey": "CpCpCpCp",
         "data": "not-valid-lzstring-!!@@##",
     });
 
@@ -495,7 +510,7 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
-        .bind("undecodable-1")
+        .bind("CpCpCpCp")
         .fetch_one(&pool)
         .await
         .expect("count query must succeed");
@@ -516,13 +531,7 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
     let author_id = common::register_test_user(&pool, "test-author").await;
     let token = common::jwt_for(author_id);
 
-    submit_puzzle(
-        app.clone(),
-        &token,
-        "counters-roundtrip-1",
-        "Roundtrip Puzzle",
-    )
-    .await;
+    submit_puzzle(app.clone(), &token, "CcCcCcCc", "Roundtrip Puzzle").await;
 
     sqlx::query(
         "UPDATE puzzles SET likes = $1, downloads = $2, completions = $3 WHERE short_key = $4",
@@ -530,7 +539,7 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
     .bind(42_i32)
     .bind(7_i32)
     .bind(3_i32)
-    .bind("counters-roundtrip-1")
+    .bind("CcCcCcCc")
     .execute(&pool)
     .await
     .expect("counter update must succeed");
@@ -548,7 +557,7 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
     let list = body.as_array().expect("list/new returns a JSON array");
     let entry = list
         .iter()
-        .find(|p| p["shortKey"] == "counters-roundtrip-1")
+        .find(|p| p["shortKey"] == "CcCcCcCc")
         .expect("submitted puzzle present in list/new");
     assert_eq!(entry["likes"], 42);
     assert_eq!(entry["downloads"], 7);
