@@ -30,6 +30,7 @@ pub fn app(state: db::AppState) -> Router {
             "/v1/puzzles/download/{id_or_key}",
             get(routes::puzzles::download),
         )
+        .route("/v1/puzzles/search", post(routes::puzzles::search))
         .layer(cors)
         .with_state(state)
 }
