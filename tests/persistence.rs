@@ -580,6 +580,210 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
     assert_eq!(entry["completions"], 3);
 }
 
+/// ROADMAP SC3 / D-14/D-15/D-16/D-17: table-driven proof that every submission-rejection rule
+/// this plan implements answers its own exact `T.backendErrors` code and, per SC3's "no rejected
+/// puzzle leaves a row" guarantee, creates no row. Each case starts from the canonical submission
+/// (a valid title, a distinct valid `shortKey`, `sample_game_data()`) and mutates exactly one
+/// aspect, so a failing assertion is never ambiguous about which rule broke.
+#[sqlx::test]
+async fn submit_rejects_invalid_puzzles(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "rejects-author").await;
+    let token = common::jwt_for(author_id);
+
+    let long_title = "a".repeat(21);
+
+    let mut no_emitters_data = sample_game_data();
+    no_emitters_data["buildings"] =
+        json!([{ "type": "goal", "item": "CuCuCuCu", "pos": { "x": 4, "y": 3, "r": 90 } }]);
+
+    let mut no_goals_data = sample_game_data();
+    no_goals_data["buildings"] =
+        json!([{ "type": "emitter", "item": "CuCuCuCu", "pos": { "x": 0, "y": 0, "r": 0 } }]);
+
+    let mut bad_emitter_item_data = sample_game_data();
+    bad_emitter_item_data["buildings"][0]["item"] = json!("nope");
+
+    let mut bad_goal_item_data = sample_game_data();
+    bad_goal_item_data["buildings"][1]["item"] = json!("nope");
+
+    let mut bad_placement_data = sample_game_data();
+    bad_placement_data["buildings"][1]["pos"] = json!({ "x": 5, "y": 5, "r": 90 });
+
+    let cases: Vec<(&str, String, &str, Value, &str)> = vec![
+        (
+            "title too short (3 chars)",
+            "abc".to_string(),
+            "RrRrRrRr",
+            sample_game_data(),
+            "bad-title-too-many-spaces",
+        ),
+        (
+            "title too long (21 chars)",
+            long_title,
+            "CgCgCgCg",
+            sample_game_data(),
+            "bad-title-too-many-spaces",
+        ),
+        (
+            "profane title",
+            "FUCK Puzzle".to_string(),
+            "SbSbSbSb",
+            sample_game_data(),
+            "profane-title",
+        ),
+        (
+            "malformed shortKey",
+            "Malformed Key".to_string(),
+            "shape:CuCuCuCu",
+            sample_game_data(),
+            "bad-short-key",
+        ),
+        (
+            "no emitters",
+            "No Emitters".to_string(),
+            "WyWyWyWy",
+            no_emitters_data,
+            "no-emitters",
+        ),
+        (
+            "no goals",
+            "No Goals".to_string(),
+            "RpRpRpRp",
+            no_goals_data,
+            "no-goals",
+        ),
+        (
+            "bad emitter item",
+            "Bad Emitter".to_string(),
+            "CcCcCcCc",
+            bad_emitter_item_data,
+            "bad-shape-key-in-emitter",
+        ),
+        (
+            "bad goal item",
+            "Bad Goal".to_string(),
+            "SwSwSwSw",
+            bad_goal_item_data,
+            "bad-shape-key-in-goal",
+        ),
+        (
+            "bad placement",
+            "Bad Placement".to_string(),
+            "WuWuWuWu",
+            bad_placement_data,
+            "bad-building-placement",
+        ),
+    ];
+
+    for (label, title, short_key, data, expected_code) in cases {
+        let body = json!({
+            "title": title,
+            "shortKey": short_key,
+            "data": data.to_string(),
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/puzzles/submit")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-token", &token)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "case {label}: expected HTTP 200"
+        );
+        let response_body = body_to_json(response).await;
+        assert_eq!(
+            response_body,
+            json!({ "error": expected_code }),
+            "case {label}: unexpected error code"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
+            .bind(short_key)
+            .fetch_one(&pool)
+            .await
+            .expect("count query must succeed");
+        assert_eq!(
+            count, 0,
+            "case {label}: a rejected puzzle must leave no row"
+        );
+    }
+}
+
+/// Locks in the distinction between `bad-short-key` (malformed, above) and
+/// `short-key-already-taken` (well-formed but a duplicate): the first submission of a well-formed
+/// `shortKey` succeeds, the second answers `short-key-already-taken`, and exactly one row exists.
+#[sqlx::test]
+async fn submit_rejects_duplicate_short_key(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "dup-author").await;
+    let token = common::jwt_for(author_id);
+
+    let body = json!({
+        "title": "Duplicate Key Puzzle",
+        "shortKey": "CuCuCuCu",
+        "data": sample_game_data().to_string(),
+    });
+
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = body_to_json(first_response).await;
+    assert!(
+        first_body.get("id").is_some(),
+        "first submission must return a PuzzleMetadata, got: {first_body}"
+    );
+
+    let second_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/puzzles/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-token", &token)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(second_response, "short-key-already-taken").await;
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
+        .bind("CuCuCuCu")
+        .fetch_one(&pool)
+        .await
+        .expect("count query must succeed");
+    assert_eq!(
+        count, 1,
+        "exactly one row must exist after the duplicate is rejected"
+    );
+}
+
 /// D-17/06-VALIDATION.md: sweeps the four error paths visible at this stage of the phase in one
 /// test, proving the all-200 contract holds across handler categories -- not-found (repository),
 /// bad-payload (decode), unauthorized (missing token), bad-token (invalid token). None of the
