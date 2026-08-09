@@ -235,17 +235,19 @@ pub async fn download(
 mod tests {
     use super::*;
 
-    // Source: compressX64 output from tobspr-games/shapez.io, commit
-    // ae88eb48b2834e32fd8c5cf5d91179c6328d78db
-    const OFFICIAL_FIXTURE: &str = "N4IgbgpgTgzglgewHYgFwEYA0IBGCCuSAJjGqAO5roAM2AFmgBwC+2O+cANkXEgOalUAbVAAXAJ4AHCGhAQAtnFGjoIbEoWyYdAIbTUAYXxGT+NSEkJBoAB5paIcfexR7zVmKkzUIPgh2c5hryWrr6pqbmltYgdqgArNhOCS5oAJzU7pie0rI4nAgAxgDWUVZksWgATEnVqRiMmcwAutgQNoWc+EQQRABCHNy8AmhCIEbK0ACycFBQCFC9IM3MQA";
+    // The decompressed payload below is written by this project, not by any real client; only the
+    // ENCODING is authentic: this is `compressX64` (lz-string, `EncodedURIComponent` variant)
+    // applied to the canonical payload also used verbatim as `CE_FIXTURE`. This test exercises
+    // `decode_puzzle_data`'s compressed-input branch, not the content's provenance.
+    const OFFICIAL_FIXTURE: &str = "N4IgbgpgTgzglgewHYgFwEYA0IBGCCuSAJjGqAO5roAM2AFmgBwC+2O+cANkXEgOalUAbVAAXAJ4AHCGhAQAtnFGjoIbEoWyAwvh178akJISDQADzS0Q4y9iiXmrMVJmoQfBAENOhjfO26gTqGxqYgFqgALNg2qADMdmgAnNSOmM7SsjicCADGANYhJmThaABMMeWJGIypzAC62BBmuZz4RBBEAEIc3LwCaEIgOsrQALJwUFAIUJ0g9cxAA";
 
     // Source: JSON.stringify shape confirmed against tobspr-games/shapez-community-edition,
     // commit a3fdbf4f594772bbb8b72910987e7a23008fea8f, src/js/platform/api.js:255
-    const CE_FIXTURE: &str = r#"{"version":1,"bounds":{"w":10,"h":8},"buildings":[{"type":"emitter","item":"shape:CuCuCuCu","pos":{"x":0,"y":0,"r":0}},{"type":"goal","item":"shape:CuCuCuCu","pos":{"x":5,"y":5,"r":90}},{"type":"block","pos":{"x":2,"y":2,"r":180}}],"excludedBuildings":["CutterMirrored"]}"#;
+    const CE_FIXTURE: &str = r#"{"version":1,"bounds":{"w":10,"h":8},"buildings":[{"type":"emitter","item":"CuCuCuCu","pos":{"x":0,"y":0,"r":0}},{"type":"goal","item":"CuCuCuCu","pos":{"x":4,"y":3,"r":90}},{"type":"block","pos":{"x":2,"y":2,"r":180}}],"excludedBuildings":["CutterMirrored"]}"#;
 
     #[test]
     fn decodes_authentic_official_compressed_fixture() {
-        assert_eq!(OFFICIAL_FIXTURE.len(), 256, "fixture must not be truncated");
+        assert_eq!(OFFICIAL_FIXTURE.len(), 251, "fixture must not be truncated");
         let data = decode_puzzle_data(OFFICIAL_FIXTURE).expect("official fixture must decode");
         assert_eq!(data.bounds.w, 10);
         assert_eq!(data.bounds.h, 8);

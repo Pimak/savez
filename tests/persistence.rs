@@ -18,12 +18,12 @@ fn puzzle_game_data_field_names_match_typedefs() {
         bounds: Bounds { w: 10, h: 8 },
         buildings: vec![
             PuzzleGameBuilding::Emitter {
-                item: "shape:CuCuCuCu".to_string(),
+                item: "CuCuCuCu".to_string(),
                 pos: Pos { x: 0, y: 0, r: 0 },
             },
             PuzzleGameBuilding::Goal {
-                item: "shape:CuCuCuCu".to_string(),
-                pos: Pos { x: 5, y: 5, r: 90 },
+                item: "CuCuCuCu".to_string(),
+                pos: Pos { x: 4, y: 3, r: 90 },
             },
             PuzzleGameBuilding::Block {
                 pos: Pos { x: 2, y: 2, r: 180 },
@@ -49,7 +49,7 @@ fn puzzle_game_data_field_names_match_typedefs() {
 
     let emitter = &buildings[0];
     assert_eq!(emitter["type"], "emitter");
-    assert_eq!(emitter["item"], "shape:CuCuCuCu");
+    assert_eq!(emitter["item"], "CuCuCuCu");
     assert!(emitter.get("pos").is_some());
     assert_eq!(emitter["pos"]["x"], 0);
     assert_eq!(emitter["pos"]["y"], 0);
@@ -57,7 +57,7 @@ fn puzzle_game_data_field_names_match_typedefs() {
 
     let goal = &buildings[1];
     assert_eq!(goal["type"], "goal");
-    assert_eq!(goal["item"], "shape:CuCuCuCu");
+    assert_eq!(goal["item"], "CuCuCuCu");
 
     let block = &buildings[2];
     assert_eq!(block["type"], "block");
@@ -140,8 +140,8 @@ fn sample_game_data() -> Value {
         "version": 1,
         "bounds": { "w": 10, "h": 8 },
         "buildings": [
-            { "type": "emitter", "item": "shape:CuCuCuCu", "pos": { "x": 0, "y": 0, "r": 0 } },
-            { "type": "goal", "item": "shape:CuCuCuCu", "pos": { "x": 5, "y": 5, "r": 90 } },
+            { "type": "emitter", "item": "CuCuCuCu", "pos": { "x": 0, "y": 0, "r": 0 } },
+            { "type": "goal", "item": "CuCuCuCu", "pos": { "x": 4, "y": 3, "r": 90 } },
             { "type": "block", "pos": { "x": 2, "y": 2, "r": 180 } },
         ],
         "excludedBuildings": ["CutterMirrored"],
