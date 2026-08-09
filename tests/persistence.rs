@@ -407,10 +407,11 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
     assert_eq!(list[1]["author"], "test-author");
 }
 
-/// D-05: `top-rated` and `mine` always answer 200 with an empty array, never an error and never a
-/// copy of `new`'s content, even once puzzles exist.
+/// D-05: `top-rated` always answers 200 with an empty array, never an error and never a copy of
+/// `new`'s content, even once puzzles exist — ranking by likes arrives in Phase 7.
+/// TODO(Phase 7): replace this expectation once REQ-business-logic wires real ranking.
 #[sqlx::test]
-async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
+async fn list_top_rated_returns_empty(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
@@ -419,26 +420,19 @@ async fn list_top_rated_and_mine_return_empty(pool: PgPool) {
 
     submit_puzzle(app.clone(), &token, "CbCbCbCb", "Some Puzzle").await;
 
-    for category in ["top-rated", "mine"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/puzzles/list/{category}"))
-                    .header("x-token", &token)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "category={category}");
-        let body = body_to_json(response).await;
-        assert_eq!(
-            body,
-            json!([]),
-            "category={category} must return an empty array"
-        );
-    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/top-rated")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body, json!([]), "top-rated must return an empty array");
 }
 
 /// D-06/D-07: downloading a puzzle never increments `downloads` and never flips `completed`.
@@ -484,6 +478,10 @@ async fn download_does_not_increment_counter(pool: PgPool) {
         .find(|p| p["shortKey"] == "CyCyCyCy")
         .expect("submitted puzzle present in list/new");
     assert_eq!(entry["downloads"], 0);
+    // `completed` is now CALCULATED per-user via a `LEFT JOIN puzzle_completions` (plan 06-04),
+    // not hardcoded `false` -- it reads `false` here because `test-author` has no
+    // `puzzle_completions` row for this puzzle, not because the field is a dead literal. See
+    // `completed_field_is_per_user` for the proof that it actually varies by caller.
     assert_eq!(entry["completed"], false);
 
     let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
@@ -866,4 +864,406 @@ async fn error_taxonomy(pool: PgPool) {
         .await
         .unwrap();
     assert_error_code(bad_token_response, "bad-token").await;
+}
+
+/// Issues a search request against `POST /v1/puzzles/search`, always with a full body (relying on
+/// the handler's `#[serde(default ...)]` behavior is exercised separately, not here).
+async fn search_request(
+    app: axum::Router,
+    token: Option<&str>,
+    search_term: &str,
+    difficulty: &str,
+    duration: &str,
+) -> axum::response::Response {
+    let body = json!({
+        "searchTerm": search_term,
+        "difficulty": difficulty,
+        "duration": duration,
+    });
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/puzzles/search")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        builder = builder.header("x-token", token);
+    }
+    app.oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
+}
+
+/// D-05/D-06 + T-06-22: `list/new`, `list/mine`, `download` and `search` all require a valid
+/// `x-token` — no header at all answers `unauthorized`, a syntactically-invalid token answers
+/// `bad-token`. Every one of the eight responses below must be HTTP 200 (D-17: rejection is a
+/// business error, never a bare 401).
+#[sqlx::test]
+async fn list_search_download_require_auth(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "auth-gate-author").await;
+    let token = common::jwt_for(author_id);
+    submit_puzzle(app.clone(), &token, "RgRgRgRg", "Auth Gate Puzzle").await;
+
+    // (missing header, expected code)
+    for (variant_name, header_token) in [("missing", None), ("garbage", Some("not-a-jwt"))] {
+        let expected_code = if header_token.is_none() {
+            "unauthorized"
+        } else {
+            "bad-token"
+        };
+
+        let mut list_new_req = Request::builder().uri("/v1/puzzles/list/new");
+        if let Some(t) = header_token {
+            list_new_req = list_new_req.header("x-token", t);
+        }
+        let list_new_resp = app
+            .clone()
+            .oneshot(list_new_req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_error_code(list_new_resp, expected_code).await;
+
+        let mut list_mine_req = Request::builder().uri("/v1/puzzles/list/mine");
+        if let Some(t) = header_token {
+            list_mine_req = list_mine_req.header("x-token", t);
+        }
+        let list_mine_resp = app
+            .clone()
+            .oneshot(list_mine_req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_error_code(list_mine_resp, expected_code).await;
+
+        let mut download_req = Request::builder().uri("/v1/puzzles/download/RgRgRgRg");
+        if let Some(t) = header_token {
+            download_req = download_req.header("x-token", t);
+        }
+        let download_resp = app
+            .clone()
+            .oneshot(download_req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_error_code(download_resp, expected_code).await;
+
+        let search_resp = search_request(app.clone(), header_token, "", "any", "any").await;
+        assert_error_code(search_resp, expected_code).await;
+
+        let _ = variant_name; // used only for readability of the loop above
+    }
+}
+
+/// SC4/T-06-19: `completed` is computed relative to the CALLING user, never a global flag — proven
+/// by inserting a `puzzle_completions` row directly for user A only (the `complete` endpoint itself
+/// doesn't exist until plan 06-05, so this direct insert is the only way to construct the
+/// precondition here) and observing the SAME puzzle read back as `completed: true` for A and
+/// `completed: false` for B, on both `list/new` and `download`.
+#[sqlx::test]
+async fn completed_field_is_per_user(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let user_a = common::register_test_user(&pool, "completer-a").await;
+    let user_b = common::register_test_user(&pool, "completer-b").await;
+    let token_a = common::jwt_for(user_a);
+    let token_b = common::jwt_for(user_b);
+
+    let submitted = submit_puzzle(app.clone(), &token_a, "RbRbRbRb", "Completable Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number") as i32;
+
+    sqlx::query(
+        "INSERT INTO puzzle_completions (user_id, puzzle_id, time_taken, liked) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_a)
+    .bind(puzzle_id)
+    .bind(12.5_f32)
+    .bind(false)
+    .execute(&pool)
+    .await
+    .expect("direct completion insert must succeed");
+
+    for (token, expected_completed) in [(&token_a, true), (&token_b, false)] {
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/puzzles/list/new")
+                    .header("x-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = body_to_json(list_response).await;
+        let entry = list_body
+            .as_array()
+            .expect("list/new returns a JSON array")
+            .iter()
+            .find(|p| p["shortKey"] == "RbRbRbRb")
+            .expect("submitted puzzle present in list/new");
+        assert_eq!(
+            entry["completed"], expected_completed,
+            "list/new completed mismatch for token"
+        );
+
+        let download_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/puzzles/download/RbRbRbRb")
+                    .header("x-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let download_body = body_to_json(download_response).await;
+        assert_eq!(
+            download_body["meta"]["completed"], expected_completed,
+            "download completed mismatch for token"
+        );
+    }
+}
+
+/// D-10/D-13/T-06-17/T-06-18: `list/mine` returns the caller's own puzzles including ones they
+/// hid, `list/new` excludes a hidden puzzle even for its own author, and `download` of a hidden
+/// puzzle succeeds for its author but resolves to `not-found` for anyone else. The hide itself is
+/// performed via direct SQL (`delete/:id` is plan 06-05 scope, not yet implemented).
+#[sqlx::test]
+async fn list_mine_returns_only_own_puzzles_including_hidden(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_a = common::register_test_user(&pool, "mine-author-a").await;
+    let author_b = common::register_test_user(&pool, "mine-author-b").await;
+    let token_a = common::jwt_for(author_a);
+    let token_b = common::jwt_for(author_b);
+
+    submit_puzzle(app.clone(), &token_a, "RcRcRcRc", "A First Puzzle").await;
+    submit_puzzle(app.clone(), &token_a, "RwRwRwRw", "A Second Puzzle").await;
+    submit_puzzle(app.clone(), &token_b, "RuRuRuRu", "B Puzzle").await;
+
+    sqlx::query("UPDATE puzzles SET hidden_at = now(), hidden_by = $1 WHERE short_key = $2")
+        .bind(author_a)
+        .bind("RwRwRwRw")
+        .execute(&pool)
+        .await
+        .expect("hiding puzzle must succeed");
+
+    let mine_a_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/mine")
+                .header("x-token", &token_a)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mine_a_body = body_to_json(mine_a_response).await;
+    let mine_a_keys: Vec<&str> = mine_a_body
+        .as_array()
+        .expect("list/mine returns a JSON array")
+        .iter()
+        .map(|p| p["shortKey"].as_str().expect("shortKey is a string"))
+        .collect();
+    assert_eq!(mine_a_keys.len(), 2, "author A must see both own puzzles");
+    assert!(mine_a_keys.contains(&"RcRcRcRc"));
+    assert!(
+        mine_a_keys.contains(&"RwRwRwRw"),
+        "author A must still see their own hidden puzzle via mine"
+    );
+
+    let mine_b_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/mine")
+                .header("x-token", &token_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mine_b_body = body_to_json(mine_b_response).await;
+    let mine_b_keys: Vec<&str> = mine_b_body
+        .as_array()
+        .expect("list/mine returns a JSON array")
+        .iter()
+        .map(|p| p["shortKey"].as_str().expect("shortKey is a string"))
+        .collect();
+    assert_eq!(
+        mine_b_keys,
+        vec!["RuRuRuRu"],
+        "author B sees only own puzzle"
+    );
+
+    let new_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/new")
+                .header("x-token", &token_a)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let new_body = body_to_json(new_response).await;
+    let new_keys: Vec<&str> = new_body
+        .as_array()
+        .expect("list/new returns a JSON array")
+        .iter()
+        .map(|p| p["shortKey"].as_str().expect("shortKey is a string"))
+        .collect();
+    assert!(
+        !new_keys.contains(&"RwRwRwRw"),
+        "list/new must not show a puzzle hidden by its own author"
+    );
+
+    let download_by_author_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/RwRwRwRw")
+                .header("x-token", &token_a)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(download_by_author_response.status(), StatusCode::OK);
+    let download_by_author_body = body_to_json(download_by_author_response).await;
+    assert_eq!(download_by_author_body["meta"]["shortKey"], "RwRwRwRw");
+
+    let download_by_stranger_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/RwRwRwRw")
+                .header("x-token", &token_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(download_by_stranger_response, "not-found").await;
+}
+
+/// `search` filters on `title ILIKE` only (Phase 6 -> Phase 7 seam for difficulty/duration):
+/// case-insensitive substring match, empty term returns everything, a literal `%` is escaped so it
+/// matches nothing rather than acting as a wildcard, a hidden puzzle never appears, and `any`/`any`
+/// filters exclude nothing.
+#[sqlx::test]
+async fn search_filters_by_title(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "search-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(app.clone(), &token, "SrSrSrSr", "Robot Factory").await;
+    submit_puzzle(app.clone(), &token, "SgSgSgSg", "Cutter Palace").await;
+    submit_puzzle(app.clone(), &token, "SbSbSbSb", "Mixing Station").await;
+
+    sqlx::query("UPDATE puzzles SET hidden_at = now(), hidden_by = $1 WHERE short_key = $2")
+        .bind(author_id)
+        .bind("SbSbSbSb")
+        .execute(&pool)
+        .await
+        .expect("hiding puzzle must succeed");
+
+    // Fragment present in exactly one title.
+    let response = search_request(app.clone(), Some(&token), "robot", "any", "any").await;
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("search returns a JSON array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["shortKey"], "SrSrSrSr");
+
+    // Case-insensitive.
+    let response = search_request(app.clone(), Some(&token), "ROBOT", "any", "any").await;
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("search returns a JSON array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["shortKey"], "SrSrSrSr");
+
+    // Empty search term returns everything visible (hidden puzzle excluded).
+    let response = search_request(app.clone(), Some(&token), "", "any", "any").await;
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("search returns a JSON array");
+    assert_eq!(
+        list.len(),
+        2,
+        "empty search term must return all visible puzzles"
+    );
+    let keys: Vec<&str> = list
+        .iter()
+        .map(|p| p["shortKey"].as_str().expect("shortKey is a string"))
+        .collect();
+    assert!(
+        !keys.contains(&"SbSbSbSb"),
+        "hidden puzzle must never appear in search results"
+    );
+
+    // A literal `%` must be escaped, not interpreted as a wildcard -- proof it matches nothing.
+    let response = search_request(app.clone(), Some(&token), "%", "any", "any").await;
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("search returns a JSON array");
+    assert_eq!(
+        list.len(),
+        0,
+        "a literal '%' search term must be escaped, not act as a wildcard"
+    );
+}
+
+/// D-05/T-06-13: `search` rejects unknown `difficulty`/`duration` values and an oversized
+/// `searchTerm` with `bad-payload`; `list` rejects an unrecognized category with `bad-category`;
+/// `top-rated` stays a recognized category answering `200 []`, never an error.
+#[sqlx::test]
+async fn search_and_list_reject_bad_filters_and_category(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "reject-author").await;
+    let token = common::jwt_for(author_id);
+
+    let bad_difficulty_response =
+        search_request(app.clone(), Some(&token), "", "impossible", "any").await;
+    assert_error_code(bad_difficulty_response, "bad-payload").await;
+
+    let bad_duration_response =
+        search_request(app.clone(), Some(&token), "", "any", "eternal").await;
+    assert_error_code(bad_duration_response, "bad-payload").await;
+
+    let too_long_term = "a".repeat(101);
+    let bad_term_response =
+        search_request(app.clone(), Some(&token), &too_long_term, "any", "any").await;
+    assert_error_code(bad_term_response, "bad-payload").await;
+
+    let bad_category_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/wat")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(bad_category_response, "bad-category").await;
+
+    let top_rated_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/top-rated")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(top_rated_response.status(), StatusCode::OK);
+    let top_rated_body = body_to_json(top_rated_response).await;
+    assert_eq!(top_rated_body, json!([]));
 }
