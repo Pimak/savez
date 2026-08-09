@@ -24,7 +24,7 @@ Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with
 
 ## Development status
 
-The project is currently in **phase 1 of 12** (project foundations). See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
+The project has completed **phase 6 of 12** (complete shapez `ClientAPI` contract): all 21 real `T.backendErrors` wire codes, mandatory `x-token` authentication on every `/v1/puzzles/*` route, the all-HTTP-200 business-error convention (with its documented 5xx infrastructure-failure exception), full submission validation (emitters, goals, shape-key grammar, `shortKey`, title, building placement), per-user `completed`/`mine`, and author-reversible puzzle deletion. See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
 
 ## License
 
