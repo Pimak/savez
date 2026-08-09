@@ -24,22 +24,28 @@ pub struct PuzzleMetadata {
     pub completed: bool,
 }
 
-/// `GET /v1/puzzles/list/{category}`. Only `new` is backed by a real query (D-04): it reflects
-/// the actual submitted puzzles, newest first. `top-rated` and `mine` return `200 []` rather than
-/// an error or a copy of `new` (D-05) — ranking by likes arrives in Phase 7, and `mine` needs a
-/// current user that doesn't exist before Phase 5. Any other category value also falls back to an
-/// empty array in 200, per the project's all-200 convention (DEC-api-contract-conventions): an
-/// unknown category is never a 404.
+/// `GET /v1/puzzles/list/{category}`. This handler's contract changed in Phase 6, hardening D-05's
+/// Phase 3 placeholder: `new` is a real query, newest first (D-04, unchanged). `mine` is now ALSO a
+/// real query (D-13) — it reflects the authenticated caller's own puzzles, including ones they have
+/// hidden (D-10). `top-rated` still returns `200 []` — ranking by likes arrives in Phase 7
+/// (REQ-business-logic) — but this is a recognized category answering an empty list, not an error.
+/// Any OTHER category value is now rejected with the wire code `bad-category`, replacing the
+/// Phase 3 silent-empty-array fallback: this is a deliberate hardening of D-05, not a copy of its
+/// original behavior.
 pub async fn list(
     State(state): State<AppState>,
     Path(category): Path<String>,
+    auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
     match category.as_str() {
-        "new" => Ok(Json(repository::list_new(&state.pool).await?)),
-        // D-05: top-rated (sort by likes) and mine (current-user scope) are not implementable
-        // before Phase 7/Phase 5 respectively; an empty list is the contractually-correct
-        // placeholder, never an error and never `new`'s content.
-        _ => Ok(Json(Vec::new())),
+        "new" => Ok(Json(repository::list_new(&state.pool, auth.user_id).await?)),
+        "mine" => Ok(Json(
+            repository::list_mine(&state.pool, auth.user_id).await?,
+        )),
+        // TODO(Phase 7): REQ-business-logic ranks `top-rated` by likes (then completions). Until
+        // then this is a recognized category that always answers an empty list, never an error.
+        "top-rated" => Ok(Json(Vec::new())),
+        _ => Err(AppError::BadCategory),
     }
 }
 
@@ -216,7 +222,7 @@ pub async fn submit(
         data,
     };
     let id = repository::insert_puzzle(&state.pool, &request, auth.user_id).await?;
-    let full = repository::find_puzzle_by_id(&state.pool, id)
+    let full = repository::find_puzzle_by_id(&state.pool, auth.user_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(full.meta))
@@ -228,20 +234,65 @@ pub async fn submit(
 /// client-chosen `short_key` is not guaranteed to be non-numeric (structural validation of
 /// submitted `shortKey` values is deferred to Phase 6 — CONTEXT.md Deferred Ideas), so an
 /// id-first lookup could silently resolve an all-digit `short_key` to an unrelated puzzle that
-/// happens to share that numeric `id`. Does NOT increment `downloads` (D-06) nor compute
-/// `completed` (D-07, stays `false` — no current user exists before Phase 5).
+/// happens to share that numeric `id`. Does NOT increment `downloads` (D-06). `completed` is now
+/// computed relative to the authenticated caller (SC4), and D-05/D-10 both require a token: a
+/// puzzle hidden by a third party resolves to `not-found` for anyone but its own author.
 pub async fn download(
     State(state): State<AppState>,
     Path(id_or_key): Path<String>,
+    auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<PuzzleFullData>, AppError> {
-    if let Some(full) = repository::find_puzzle_by_short_key(&state.pool, &id_or_key).await? {
+    if let Some(full) =
+        repository::find_puzzle_by_short_key(&state.pool, auth.user_id, &id_or_key).await?
+    {
         return Ok(Json(full));
     }
     let full = match id_or_key.parse::<i32>() {
-        Ok(id) => repository::find_puzzle_by_id(&state.pool, id).await?,
+        Ok(id) => repository::find_puzzle_by_id(&state.pool, auth.user_id, id).await?,
         Err(_) => None,
     };
     full.map(Json).ok_or(AppError::NotFound)
+}
+
+/// Wire body of `POST /v1/puzzles/search` (`interfaces` in 06-04-PLAN.md, `api.js:142-154`).
+/// Every field carries a `#[serde(default ...)]`: a partial body must behave as an unfiltered
+/// search, not as a 4xx JSON-deserialization error — axum's automatic rejection on missing fields
+/// would produce a status code outside the project's all-200 taxonomy
+/// (DEC-api-contract-conventions), which this project never allows for a well-formed but partial
+/// request body.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRequest {
+    #[serde(default)]
+    pub search_term: String,
+    #[serde(default = "default_any_filter")]
+    pub difficulty: String,
+    #[serde(default = "default_any_filter")]
+    pub duration: String,
+}
+
+fn default_any_filter() -> String {
+    "any".to_string()
+}
+
+/// `POST /v1/puzzles/search`. Requires `x-token` (D-05/D-06) — see `list`/`download` above for the
+/// same requirement. `difficulty`/`duration` are validated but currently inert: the Phase 6 ->
+/// Phase 7 seam documented in 06-04-PLAN.md `<interfaces>` — `puzzles.difficulty` and
+/// `puzzles.average_time` are never populated by any write path before Phase 7 (D-01 reserves
+/// aggregate columns to REQ-business-logic), so only `search_term` filters the result set today.
+pub async fn search(
+    State(state): State<AppState>,
+    auth: crate::auth::extractor::AuthUser,
+    Json(payload): Json<SearchRequest>,
+) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
+    validation::validate_search_filters(
+        &payload.search_term,
+        &payload.difficulty,
+        &payload.duration,
+    )?;
+    Ok(Json(
+        repository::search_puzzles(&state.pool, auth.user_id, payload.search_term.trim()).await?,
+    ))
 }
 
 #[cfg(test)]
