@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::AppState;
 use crate::error::AppError;
 use crate::repository;
+use crate::validation;
 
 /// Field names/casing verified byte-for-byte against `tobspr-games/shapez.io`'s
 /// `src/js/savegame/savegame_typedefs.js`.
@@ -183,23 +184,35 @@ fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
     serde_json::from_str(&json).map_err(|_| AppError::InvalidPuzzleData)
 }
 
-// TODO(Phase 6): the exact submission response shape (and the `T.backendErrors` error codes) is
-// part of the full ClientAPI contract (DEC-api-contract-conventions), delivered in Phase 6
-// (REQ-shapez-contract-complete). In Phase 3 the created `PuzzleMetadata` is returned as-is.
+// The submission response shape is the created `PuzzleMetadata`, unchanged since Phase 3: the
+// client only inspects the presence of a top-level `error` key (`ClientAPI._request()`), it does
+// not otherwise special-case a successful `submit` body. Validation of the submission itself is
+// now complete (REQ-shapez-contract-complete): every business rule below runs before any write.
 //
 // `payload` never carries an effective author: `SubmitPuzzleRequest` has no author-shaped field,
 // and serde silently drops unknown JSON keys, so a client-supplied `author`/`authorId` is
 // structurally without effect (T-03-21/T-05-05) — the author is always `auth.user_id`, taken from
 // the server-verified JWT injected by the `AuthUser` extractor, never anything the client sends.
+//
+// Validation order below is mandatory and not permutable, on the same model as `login()`
+// (`routes/auth.rs`) — it decides which single error code comes back when a submission breaks
+// several rules at once: decode, then title, then short key, then game data, and ONLY THEN the
+// database round-trip for uniqueness. Title/short key/game-data checks are pure and cheap; short
+// key uniqueness is the one rule that needs a database round-trip, so it must run last — a
+// malformed short key must never consume a SQL query.
 pub async fn submit(
     State(state): State<AppState>,
     auth: crate::auth::extractor::AuthUser,
     Json(payload): Json<SubmitPuzzlePayload>,
 ) -> Result<Json<PuzzleMetadata>, AppError> {
     let data = decode_puzzle_data(&payload.data)?;
+    let title = validation::validate_title(&payload.title)?;
+    let short_key = validation::validate_short_key(&payload.short_key)?;
+    validation::validate_game_data(&data)?;
+
     let request = SubmitPuzzleRequest {
-        title: payload.title,
-        short_key: payload.short_key,
+        title,
+        short_key,
         data,
     };
     let id = repository::insert_puzzle(&state.pool, &request, auth.user_id).await?;
