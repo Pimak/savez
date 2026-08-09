@@ -295,6 +295,95 @@ pub async fn search(
     ))
 }
 
+/// `complete/:id`, `report/:id`, `delete/:id` all take a numeric `:id` path segment. This resolves
+/// it manually via a plain string extractor rather than declaring a numeric path type on the
+/// handler signature: axum's native rejection on a non-numeric segment for that numeric type
+/// produces a bare 400 outside this project's all-200 taxonomy (DEC-api-contract-conventions),
+/// which every other rejection in this codebase avoids by construction. `download`'s
+/// `id_or_key.parse::<i32>()` is the existing analog this mirrors, just factored out since three
+/// handlers need it here instead of one.
+fn parse_puzzle_id(raw: &str) -> Result<i32, AppError> {
+    raw.trim().parse::<i32>().map_err(|_| AppError::BadId)
+}
+
+/// Wire body of `POST /v1/puzzles/complete/:id` (`api.js:206-221`). Both fields carry
+/// `#[serde(default)]` so a partial/missing body is rejected by VALIDATION inside the handler
+/// (a taxonomy code) rather than by axum's JSON deserialization (a bare, non-taxonomy status) —
+/// same discipline as `SearchRequest` above. `time`'s absence defaults to `0.0`, which the
+/// handler's finiteness/positivity guard below rejects with `bad-payload`; `liked`'s absence
+/// defaults to `false`, a value the client is free to send legitimately, so no additional guard is
+/// needed on that field.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteRequest {
+    #[serde(default)]
+    pub time: f32,
+    #[serde(default)]
+    pub liked: bool,
+}
+
+/// Wire body of `POST /v1/puzzles/report/:id` (`api.js:192-204`). `#[serde(default)]` on `reason`
+/// means a missing field arrives as `""`, which `validation::validate_report_reason` rejects with
+/// `bad-payload` — never an axum-level deserialization error outside the taxonomy.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportRequest {
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `POST /v1/puzzles/complete/:id` (D-01/D-02). Rejects a non-finite or non-positive `time` before
+/// ever reaching the repository: `puzzle_completions.time_taken` is `REAL NOT NULL`, and a
+/// `NaN`/`Infinity`/zero/negative value would otherwise be persisted silently, corrupting D-02's
+/// "never regresses" guarantee (a `NaN` compares false to everything, defeating `LEAST`) and any
+/// future Phase 7 aggregate built on this column.
+pub async fn complete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: crate::auth::extractor::AuthUser,
+    Json(payload): Json<CompleteRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let id = parse_puzzle_id(&id)?;
+    if !payload.time.is_finite() || payload.time <= 0.0 {
+        return Err(AppError::BadPayload);
+    }
+    repository::upsert_completion(&state.pool, auth.user_id, id, payload.time, payload.liked)
+        .await?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// `POST /v1/puzzles/report/:id` (D-03/D-04). `reason` is validated against the strict enum before
+/// any repository call — a malformed reason must never consume a database round-trip.
+pub async fn report(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: crate::auth::extractor::AuthUser,
+    Json(payload): Json<ReportRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let id = parse_puzzle_id(&id)?;
+    validation::validate_report_reason(&payload.reason)?;
+    repository::insert_report(&state.pool, auth.user_id, id, &payload.reason).await?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// `POST /v1/puzzles/delete/:id` (D-08/D-09/D-11/D-12) — POST, never DELETE (the real client's
+/// literal method choice, `api.js:171-179`). Deliberately declares NO `Json` extractor: the client
+/// sends a literal `{}` body, and an empty or entirely absent body must not fail the request either
+/// way. Authorization is fully server-side: `auth.user_id` (from the verified JWT) is the only
+/// input to "am I the author?", never anything the client could assert about itself. A non-author
+/// gets `no-permission`, distinct from `not-found` for a puzzle that does not exist (D-12) — see
+/// `repository::soft_delete_puzzle` for the full three-way branch and its idempotence guarantee for
+/// a repeat delete by the same author.
+pub async fn delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: crate::auth::extractor::AuthUser,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let id = parse_puzzle_id(&id)?;
+    repository::soft_delete_puzzle(&state.pool, id, auth.user_id).await?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
