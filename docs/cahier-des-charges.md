@@ -74,23 +74,25 @@ Le backend implémente le contrat exact attendu par `ClientAPI` (`src/js/platfor
 
 #### Conventions transversales
 
-- Toutes les réponses en **HTTP 200**, y compris les erreurs métier (le client rejette tout statut ≠ 200).
-- Erreurs au format `{ "error": "<code>" }`, codes alignés sur les clés `T.backendErrors` des traductions du jeu (`not-found`, `bad-payload`, `short-key-already-taken`, `profane-title`, `no-emitters`, `no-goals`, `bad-building-placement`, etc.).
-- Auth par header **`x-token`** (pas de `Authorization: Bearer`). Le header `x-api-key` envoyé par le client est ignoré.
+- Toutes les réponses en **HTTP 200** pour les erreurs **MÉTIER** (le client rejette tout statut ≠ 200 par un rejet brut `bad-status: …`). Exception explicite : une panne d'**infrastructure** (`AppError::Database` — perte de connexion, épuisement du pool) reste un 5xx littéral, corps vide, jamais repliée dans la taxonomie métier — voir `docs/adr/0003-all-200-error-taxonomy.md`.
+- Erreurs au format `{ "error": "<code>" }`. Les **21 clés réelles** de `T.backendErrors` (`translations/base-en.yaml`, identiques dans les deux clients réels) : `ratelimit`, `invalid-api-key`, `unauthorized`, `bad-token`, `bad-id`, `not-found`, `bad-category`, `bad-short-key`, `profane-title`, `bad-title-too-many-spaces`, `bad-shape-key-in-emitter`, `bad-shape-key-in-goal`, `no-emitters`, `no-goals`, `short-key-already-taken`, `can-not-report-your-own-puzzle`, `bad-payload`, `bad-building-placement`, `timeout`, `too-many-likes-already`, `no-permission`. Trois codes propres au projet, sans équivalent en amont (le client affiche alors la chaîne brute reçue, comportement natif de `_request()`, pas un cas spécial à coder) : `name-already-taken`, `auth-mode-not-implemented`, `internal-error` — voir `docs/adr/0003-all-200-error-taxonomy.md`.
+- Auth par header **`x-token`** (pas de `Authorization: Bearer`). Le header `x-api-key` envoyé par le client est ignoré. **Toutes** les routes `/v1/puzzles/*` exigent un `x-token` valide ; seules `/v1/public/login` et `/healthz` sont publiques — voir `docs/adr/0001-auth-required-browsing.md`.
 - CORS activé (le client tourne en Electron/navigateur dev).
 
 #### Endpoints
 
-| Méthode | Route | Corps / paramètres | Réponse |
-|---------|-------|--------------------|---------|
-| POST | `/v1/public/login` | `{ token }` (phase 1 : token officiel — cf. 4.4) ou identifiants propres | `{ token }` (JWT du serveur) |
-| GET | `/v1/puzzles/list/:category` | `category` ∈ `new` \| `top-rated` \| `mine` | `PuzzleMetadata[]` |
-| POST | `/v1/puzzles/search` | `{ searchTerm, difficulty, duration }` | `PuzzleMetadata[]` |
-| GET | `/v1/puzzles/download/:idOrShortKey` | id numérique ou shortKey | `{ meta, game }` (`game` **décompressé**) |
-| POST | `/v1/puzzles/submit` | `{ title, shortKey, data }` (`data` compressé lz-string) | `{ success: true }` |
-| POST | `/v1/puzzles/complete/:id` | `{ time, liked }` | `{ success: true }` |
-| POST | `/v1/puzzles/report/:id` | `{ reason }` ∈ `profane` \| `unsolvable` \| `trolling` | `{ success: true }` |
-| POST | `/v1/puzzles/delete/:id` | — (POST, pas DELETE) | `{ success: true }` |
+| Méthode | Route | Corps / paramètres | Réponse | Auth (`x-token`) |
+|---------|-------|--------------------|---------|-------------------|
+| POST | `/v1/public/login` | `{ token }` (phase 1 : token officiel — cf. 4.4) ou identifiants propres | `{ token }` (JWT du serveur) | publique |
+| GET | `/v1/puzzles/list/:category` | `category` ∈ `new` \| `top-rated` \| `mine` | `PuzzleMetadata[]` | requise |
+| POST | `/v1/puzzles/search` | `{ searchTerm, difficulty, duration }` | `PuzzleMetadata[]` | requise |
+| GET | `/v1/puzzles/download/:idOrShortKey` | id numérique ou shortKey | `{ meta, game }` (`game` **décompressé**) | requise |
+| POST | `/v1/puzzles/submit` | `{ title, shortKey, data }` (`data` compressé lz-string ou JSON brut — cf. « Double format de `data` » ci-dessous) | le `PuzzleMetadata` **créé** (le client n'inspecte que l'absence d'une clé `error`, jamais `{ success: true }` — comportement inchangé depuis les Phases 3-5) | requise |
+| POST | `/v1/puzzles/complete/:id` | `{ time, liked }` | `{ success: true }` | requise |
+| POST | `/v1/puzzles/report/:id` | `{ reason }` ∈ `profane` \| `unsolvable` \| `trolling` | `{ success: true }` | requise |
+| POST | `/v1/puzzles/delete/:id` | — (POST, pas DELETE) | `{ success: true }` | requise |
+
+`/healthz` (hors contrat `ClientAPI`, supervision uniquement — cf. 6.2) est également publique. Voir `docs/adr/0001-auth-required-browsing.md` pour la justification de l'authentification désormais obligatoire sur `list`/`download`/`search`, qui casse volontairement l'accès anonyme dont ces routes bénéficiaient depuis les Phases 3/4.
 
 #### Types de données
 
@@ -99,7 +101,14 @@ Cf. `src/js/savegame/savegame_typedefs.js` :
 - `PuzzleMetadata` : `id`, `shortKey`, `likes`, `downloads`, `completions`, `difficulty` (nullable), `averageTime` (nullable), `title`, `author`, `completed` (bool, relatif à l'utilisateur courant).
 - `PuzzleGameData` : `version`, `bounds {w, h}`, `buildings[]` (types `emitter` / `goal` / `block`, avec `item` et `pos {x, y, r}`).
 
-**Validation à la soumission** (reprendre les règles observables dans les codes d'erreur du client) : au moins un émetteur et un objectif, clés de forme valides, shortKey unique et bien formé, titre non profane / longueur correcte, placements valides dans les bounds.
+**Validation à la soumission**, chaque règle assortie de son code d'erreur exact :
+
+- au moins un émetteur (`no-emitters`) ;
+- au moins un objectif (`no-goals`) ;
+- l'`item` de chaque émetteur/objectif est soit un littéral de couleur (`red`, `green`, `blue`, `yellow`, `purple`, `cyan`, `white`, `uncolored`, comparaison insensible à la casse), soit une clé de forme valide (`bad-shape-key-in-emitter` / `bad-shape-key-in-goal`) — **une clé de forme ne porte aucun préfixe de type** : l'exemple `shape:CuCuCuCu` qui a circulé dans le projet était **erroné**, la forme correcte est `CuCuCuCu` ;
+- `shortKey` grammaticalement valide selon la même grammaire de forme (`bad-short-key`) et non déjà pris (`short-key-already-taken`) ;
+- titre de 4 à 20 caractères une fois trimé, alphabet `[a-zA-Z0-9_- ]` (`bad-title-too-many-spaces`), hors liste de grossièretés par correspondance de token exact (`profane-title`) ;
+- tout bâtiment (émetteur, objectif, bloc) dans les bornes de `bounds`, et jamais deux bâtiments sur la même case (`bad-building-placement`).
 
 **Double format de `data` à la soumission.** Comparaison directe des deux `ClientAPI` réels (2026-08-08, `src/js/platform/api.js`) : le client officiel compresse `data` en lz-string avant envoi (`compressX64(JSON.stringify(payload.data))`), tandis que la Community Edition envoie du JSON brut non compressé — un bug assumé côté CE, signalé par son propre commentaire `// FIXME: Server expects lzstring compressed payload`. Ce ne sont pas deux modes exclusifs à choisir au déploiement : les deux clients coexistent en usage réel, donc `/v1/puzzles/submit` doit **détecter le format automatiquement** (tentative de `JSON.parse` direct, puis décompression `lz-str`/`compressX64` en repli) plutôt que d'en supposer un seul. Aucune divergence en sens inverse : ni l'un ni l'autre client ne décompresse quoi que ce soit à la lecture, donc `GET /v1/puzzles/download/*` continue de servir `game` décompressé sans changement (cf. 4.3, « Décision »).
 
