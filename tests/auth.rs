@@ -50,7 +50,8 @@ async fn mock_oracle_ok(expected_calls: u64) -> MockServer {
 
 /// Minimal, always-decodable `POST /v1/puzzles/submit` body (Community Edition raw-JSON wire
 /// format, D-08) — this file only exercises the auth boundary, not `decode_puzzle_data` itself
-/// (covered by `tests/persistence.rs` and `src/routes/puzzles.rs`'s own unit tests).
+/// (covered by `tests/persistence.rs` and `src/routes/puzzles.rs`'s own unit tests). Also minimal
+/// AND valid under Phase 6's submission validation: exactly one emitter and one goal, in-bounds.
 fn sample_puzzle_body(short_key: &str) -> Value {
     json!({
         "title": "Auth Test Puzzle",
@@ -58,7 +59,10 @@ fn sample_puzzle_body(short_key: &str) -> Value {
         "data": json!({
             "version": 1,
             "bounds": { "w": 10, "h": 8 },
-            "buildings": [],
+            "buildings": [
+                { "type": "emitter", "item": "CuCuCuCu", "pos": { "x": 0, "y": 0, "r": 0 } },
+                { "type": "goal", "item": "CuCuCuCu", "pos": { "x": 4, "y": 3, "r": 90 } },
+            ],
             "excludedBuildings": [],
         })
         .to_string(),
@@ -89,9 +93,7 @@ async fn protected_route_does_not_call_oracle(pool: PgPool) {
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-token", &jwt)
-                .body(Body::from(
-                    sample_puzzle_body("protected-route-1").to_string(),
-                ))
+                .body(Body::from(sample_puzzle_body("WuWuWuWu").to_string()))
                 .unwrap(),
         )
         .await
@@ -112,7 +114,7 @@ async fn submit_without_token_is_401(pool: PgPool) {
                 .method("POST")
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(sample_puzzle_body("no-token-1").to_string()))
+                .body(Body::from(sample_puzzle_body("CwCwCwCw").to_string()))
                 .unwrap(),
         )
         .await
@@ -145,7 +147,7 @@ async fn submit_rejects_bearer_and_api_key(pool: PgPool) {
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .body(Body::from(sample_puzzle_body("bearer-1").to_string()))
+                .body(Body::from(sample_puzzle_body("RrRrRrRr").to_string()))
                 .unwrap(),
         )
         .await
@@ -159,7 +161,7 @@ async fn submit_rejects_bearer_and_api_key(pool: PgPool) {
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-api-key", &token)
-                .body(Body::from(sample_puzzle_body("api-key-1").to_string()))
+                .body(Body::from(sample_puzzle_body("RgRgRgRg").to_string()))
                 .unwrap(),
         )
         .await
@@ -184,7 +186,7 @@ async fn submit_attributes_puzzle_to_jwt_user(pool: PgPool) {
     let user_b = common::register_test_user(&pool, "user-b").await;
     let token_a = common::jwt_for(user_a);
 
-    let mut body = sample_puzzle_body("attribution-1");
+    let mut body = sample_puzzle_body("RbRbRbRb");
     body["authorId"] = json!(user_b.to_string());
 
     let response = app
@@ -203,7 +205,7 @@ async fn submit_attributes_puzzle_to_jwt_user(pool: PgPool) {
 
     let author_id: String =
         sqlx::query_scalar("SELECT author_id::text FROM puzzles WHERE short_key = $1")
-            .bind("attribution-1")
+            .bind("RbRbRbRb")
             .fetch_one(&pool)
             .await
             .expect("submitted puzzle row must exist");
@@ -228,7 +230,7 @@ async fn submit_with_jwt_of_unknown_user_is_rejected(pool: PgPool) {
                 .uri("/v1/puzzles/submit")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-token", &token)
-                .body(Body::from(sample_puzzle_body("unknown-user-1").to_string()))
+                .body(Body::from(sample_puzzle_body("RyRyRyRy").to_string()))
                 .unwrap(),
         )
         .await
@@ -236,7 +238,7 @@ async fn submit_with_jwt_of_unknown_user_is_rejected(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
-        .bind("unknown-user-1")
+        .bind("RyRyRyRy")
         .fetch_one(&pool)
         .await
         .expect("count query");
