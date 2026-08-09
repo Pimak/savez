@@ -10,6 +10,15 @@ use crate::routes::puzzles::{PuzzleFullData, PuzzleGameData, PuzzleMetadata, Sub
 /// take: `SubmitPuzzleRequest` has no author-shaped field, and even if it did this function would
 /// still ignore it, per D-01/D-02). Adding an author-shaped field to `SubmitPuzzleRequest` would
 /// be a regression of T-03-21/T-05-05: the server, not the client, always determines authorship.
+///
+/// Does NOT pre-check `short_key` availability with a `SELECT` before the `INSERT` (would be a
+/// TOCTOU race) — the `UNIQUE(short_key)` constraint is the single source of truth on uniqueness,
+/// same pattern as `insert_user`'s `UNIQUE(name)` handling below. This is deliberately a SEPARATE
+/// concern from the short key's FORMATION: `validation::validate_short_key` already rejected a
+/// malformed key upstream in `routes::puzzles::submit`, before this function is ever called — a
+/// unique-constraint violation here can therefore only mean "well-formed but already taken"
+/// (`short-key-already-taken`), never a malformed one (`bad-short-key`). These are two distinct
+/// rejections with two distinct wire codes, mapped by the `match` below.
 pub async fn insert_puzzle(
     pool: &PgPool,
     req: &SubmitPuzzleRequest,
@@ -27,7 +36,11 @@ pub async fn insert_puzzle(
         Json(&req.data) as Json<&PuzzleGameData>,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .map_err(|err| match &err {
+        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => AppError::ShortKeyTaken,
+        _ => AppError::Database(err),
+    })?;
 
     Ok(row.id)
 }
