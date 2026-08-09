@@ -9,6 +9,7 @@ pub mod db;
 pub mod error;
 pub mod repository;
 pub mod routes;
+pub mod validation;
 
 pub fn app(state: db::AppState) -> Router {
     let cors = CorsLayer::new()
