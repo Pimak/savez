@@ -326,3 +326,164 @@ pub async fn find_puzzle_by_short_key(
         game: row.data.0,
     }))
 }
+
+/// Upserts a puzzle completion (`POST /v1/puzzles/complete/:id`, D-01/D-02). Does NOT touch any
+/// aggregate counter (`puzzles.likes`/`completions`/`average_time`/`difficulty`) -- the exact same
+/// discipline `find_puzzle_by_id`/`find_puzzle_by_short_key` already apply to `downloads` (D-06):
+/// this function records the event and nothing else.
+/// TODO(Phase 7): REQ-business-logic updates `puzzles.completions`/`puzzles.likes`/
+/// `puzzles.average_time` from this event once aggregate counters are in scope.
+///
+/// D-02 upsert semantics, locked by the SQL below: `time_taken` NEVER regresses (kept at the
+/// minimum of the old and new value), `liked` is ALWAYS overwritten by the latest value sent,
+/// independently of whether the time improved. Reference scenario confirmed by the user:
+/// 60s/`liked=false` then a replay at 90s/`liked=true` => `time_taken=60`, `liked=true`.
+///
+/// Visibility predicate mirrors `find_puzzle_by_id` (D-10, docs/adr/0002-hidden-by-tri-state.md):
+/// a puzzle hidden by a third party is not completable by anyone but its own author -- absent row
+/// maps to the same `AppError::NotFound` as a genuinely nonexistent puzzle.
+pub async fn upsert_completion(
+    pool: &PgPool,
+    user_id: Uuid,
+    puzzle_id: i32,
+    time_taken: f32,
+    liked: bool,
+) -> Result<(), AppError> {
+    let row = sqlx::query!(
+        "SELECT author_id FROM puzzles WHERE id = $1 AND (hidden_at IS NULL OR author_id = $2)",
+        puzzle_id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if row.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    sqlx::query!(
+        r#"
+        INSERT INTO puzzle_completions (user_id, puzzle_id, time_taken, liked)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (user_id, puzzle_id)
+        DO UPDATE SET
+            time_taken = LEAST(puzzle_completions.time_taken, EXCLUDED.time_taken),
+            liked      = EXCLUDED.liked
+        "#,
+        user_id,
+        puzzle_id,
+        time_taken,
+        liked,
+    )
+    .execute(pool)
+    .await
+    .map_err(|err| match &err {
+        // Defends against the race between the visibility check above and this write: mapping a
+        // foreign-key violation on `puzzle_id` to `NotFound` rather than a bare 500, same posture
+        // as `insert_user`'s constraint-driven error mapping below.
+        sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => AppError::NotFound,
+        _ => AppError::Database(err),
+    })?;
+
+    Ok(())
+}
+
+/// Inserts a puzzle report (`POST /v1/puzzles/report/:id`, D-03/D-04). Does NOT bind the reports
+/// table's pending/upheld/rejected column: the schema `DEFAULT 'pending'` is the sole source of
+/// truth for a freshly created report, exactly as `insert_user` never binds `role`.
+/// TODO(Phase 7): REQ-moderation auto-hides a puzzle once it accumulates N distinct pending
+/// reports (default 3) and drives the review queue from there -- neither happens here, this
+/// function only records the report itself.
+///
+/// Visibility predicate identical to `upsert_completion` above (D-10): a puzzle hidden by a third
+/// party cannot be reported by anyone but its own author, who in turn cannot reach the
+/// self-report check below because `insert_report` is never called by `routes::puzzles::report`
+/// on the reporter's own puzzle in the first place -- see that rejection immediately below.
+pub async fn insert_report(
+    pool: &PgPool,
+    reporter_id: Uuid,
+    puzzle_id: i32,
+    reason: &str,
+) -> Result<(), AppError> {
+    let row = sqlx::query!(
+        "SELECT author_id FROM puzzles WHERE id = $1 AND (hidden_at IS NULL OR author_id = $2)",
+        puzzle_id,
+        reporter_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::NotFound);
+    };
+    // D-03: self-reporting is rejected before any write is attempted.
+    if row.author_id == reporter_id {
+        return Err(AppError::CannotReportOwnPuzzle);
+    }
+
+    sqlx::query!(
+        "INSERT INTO puzzle_reports (user_id, puzzle_id, reason) VALUES ($1, $2, $3)",
+        reporter_id,
+        puzzle_id,
+        reason,
+    )
+    .execute(pool)
+    .await
+    .map_err(|err| match &err {
+        // D-03: `UNIQUE(user_id, puzzle_id)` is the single source of truth for "already reported
+        // by this user" -- no pre-check `SELECT`, same TOCTOU-avoidance discipline as
+        // `insert_puzzle`'s `short_key` handling.
+        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => AppError::DuplicateReport,
+        sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => AppError::NotFound,
+        _ => AppError::Database(err),
+    })?;
+
+    Ok(())
+}
+
+/// Soft-deletes a puzzle on behalf of its own author (`POST /v1/puzzles/delete/:id`,
+/// D-08/D-09/D-11/D-12). Deliberately deviates from `insert_user`'s constraint-only pattern
+/// (06-RESEARCH.md "Pattern 4"): authorization here is a three-way branch (not-found / forbidden /
+/// success) that no single `UNIQUE`/foreign-key constraint can express, so a `SELECT` before the
+/// `UPDATE` is unavoidable and intentional, not an oversight of the TOCTOU-avoidance convention
+/// used elsewhere in this file.
+///
+/// The `SELECT` below carries NO `hidden_at` filter, unlike `upsert_completion`/`insert_report`
+/// above: a puzzle already hidden by its own author must still resolve to success on a repeat
+/// delete, never `not-found` -- this soft-delete is idempotent for its author (D-11: reversibility
+/// remains a fact of data structure only, there is no "undelete" endpoint in Phase 6).
+///
+/// D-08: only `hidden_at`/`hidden_by` are ever written -- the `puzzles` row itself is NEVER
+/// deleted, so there is no cascade to manage on `puzzle_completions`/`puzzle_reports`.
+///
+/// D-09 + docs/adr/0002-hidden-by-tri-state.md: `hidden_by` is ALWAYS `current_user_id` (the
+/// author) on this path, never `NULL` -- `NULL` is reserved exclusively for Phase 7's automatic
+/// report-threshold hide, and a moderator's own id is reserved for Phase 7's human moderation
+/// action. Writing `NULL` here would collide with a meaning this function does not own.
+///
+/// D-12: a non-author gets `AppError::NoPermission`, distinct from `AppError::NotFound` for a
+/// puzzle that does not exist at all -- the taxonomy must never conflate "doesn't exist" with
+/// "exists but isn't yours".
+pub async fn soft_delete_puzzle(
+    pool: &PgPool,
+    puzzle_id: i32,
+    current_user_id: Uuid,
+) -> Result<(), AppError> {
+    let row = sqlx::query!("SELECT author_id FROM puzzles WHERE id = $1", puzzle_id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else {
+        return Err(AppError::NotFound);
+    };
+    if row.author_id != current_user_id {
+        return Err(AppError::NoPermission);
+    }
+
+    sqlx::query!(
+        "UPDATE puzzles SET hidden_at = now(), hidden_by = $1 WHERE id = $2",
+        current_user_id,
+        puzzle_id,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}

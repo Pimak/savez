@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO puzzle_completions (user_id, puzzle_id, time_taken, liked)\n        VALUES ($1, $2, $3, $4)\n        ON CONFLICT (user_id, puzzle_id)\n        DO UPDATE SET\n            time_taken = LEAST(puzzle_completions.time_taken, EXCLUDED.time_taken),\n            liked      = EXCLUDED.liked\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Float4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ea67aee12f06f021516b0250b5a2185442796bd22746fb665ca2b6decaac747"
+}
