@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# Rust / Cargo
+# ---------------------------------------------------------------------------
+target/
+
+# NE JAMAIS ajouter .sqlx/ ni migrations/ ici : le build Dockerfile tourne avec
+# SQLX_OFFLINE=true (aucune base Postgres vivante dans le contexte de build), les macros
+# query!/query_as! doivent lire le cache .sqlx/ déjà versionné, et sqlx::migrate!() embarque
+# migrations/ dans le binaire à la compilation. Les exclure casserait la compilation hors-ligne
+# (08-RESEARCH.md Pitfall 4).
+
+# ---------------------------------------------------------------------------
+# Git / IDE / éditeurs
+# ---------------------------------------------------------------------------
+.git/
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------------------
+# Secrets & environnement local
+# ---------------------------------------------------------------------------
+.env
+
+# ---------------------------------------------------------------------------
+# Outillage Claude Code / planification -- dépôts distincts, rien à faire dans une couche
+# d'image publiée sur un registre public (savez-git-layout : .planning/ est un dépôt git séparé
+# monté/joint dans l'arborescence).
+# ---------------------------------------------------------------------------
+.claude/
+.planning/
