@@ -33,6 +33,9 @@ pub struct PuzzleMetadata {
 /// category value is rejected with the wire code `bad-category`, replacing the Phase 3
 /// silent-empty-array fallback: this is a deliberate hardening of D-05, not a copy of its original
 /// behavior.
+///
+/// Stays on `AuthUser`, deliberately not `ActiveUser`: D-13 names four blocked routes and reading
+/// is not one of them — a banned account keeps full read access, including to its own `mine` list.
 pub async fn list(
     State(state): State<AppState>,
     Path(category): Path<String>,
@@ -207,9 +210,13 @@ fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
 // database round-trip for uniqueness. Title/short key/game-data checks are pure and cheap; short
 // key uniqueness is the one rule that needs a database round-trip, so it must run last — a
 // malformed short key must never consume a SQL query.
+//
+// D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
+// `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs — a banned
+// caller never even reaches `decode_puzzle_data`.
 pub async fn submit(
     State(state): State<AppState>,
-    auth: crate::auth::extractor::AuthUser,
+    auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<SubmitPuzzlePayload>,
 ) -> Result<Json<PuzzleMetadata>, AppError> {
     let data = decode_puzzle_data(&payload.data)?;
@@ -222,8 +229,8 @@ pub async fn submit(
         short_key,
         data,
     };
-    let id = repository::insert_puzzle(&state.pool, &request, auth.user_id).await?;
-    let full = repository::find_puzzle_by_id(&state.pool, auth.user_id, id)
+    let id = repository::insert_puzzle(&state.pool, &request, auth.0.user_id).await?;
+    let full = repository::find_puzzle_by_id(&state.pool, auth.0.user_id, id)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(full.meta))
@@ -249,6 +256,9 @@ pub async fn submit(
 /// computed from the PRE-increment `downloads` (it was already read by the resolution query above)
 /// — a one-count lag with no functional consequence, self-corrects on the very next read, and is
 /// documented here rather than "fixed" with a second, redundant read.
+///
+/// Stays on `AuthUser`: reading is always allowed for a banned account (D-13 names only four
+/// blocked routes, and this isn't one of them).
 pub async fn download(
     State(state): State<AppState>,
     Path(id_or_key): Path<String>,
@@ -300,6 +310,9 @@ fn default_any_filter() -> String {
 /// this plan's scope (07-02-PLAN.md `<interfaces>` "Hors périmètre"): neither REQ-business-logic
 /// nor the ROADMAP asks for it, and no D-01..D-20 decision covers it. Only `search_term` filters
 /// the result set today.
+///
+/// Stays on `AuthUser`: reading is always allowed for a banned account (D-13 names only four
+/// blocked routes, and this isn't one of them).
 pub async fn search(
     State(state): State<AppState>,
     auth: crate::auth::extractor::AuthUser,
@@ -357,32 +370,38 @@ pub struct ReportRequest {
 /// `NaN`/`Infinity`/zero/negative value would otherwise be persisted silently, corrupting D-02's
 /// "never regresses" guarantee (a `NaN` compares false to everything, defeating `LEAST`) and any
 /// future Phase 7 aggregate built on this column.
+///
+/// D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
+/// `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs.
 pub async fn complete(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    auth: crate::auth::extractor::AuthUser,
+    auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<CompleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let id = parse_puzzle_id(&id)?;
     if !payload.time.is_finite() || payload.time <= 0.0 {
         return Err(AppError::BadPayload);
     }
-    repository::upsert_completion(&state.pool, auth.user_id, id, payload.time, payload.liked)
+    repository::upsert_completion(&state.pool, auth.0.user_id, id, payload.time, payload.liked)
         .await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
 /// `POST /v1/puzzles/report/:id` (D-03/D-04). `reason` is validated against the strict enum before
 /// any repository call — a malformed reason must never consume a database round-trip.
+///
+/// D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
+/// `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs.
 pub async fn report(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    auth: crate::auth::extractor::AuthUser,
+    auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<ReportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let id = parse_puzzle_id(&id)?;
     validation::validate_report_reason(&payload.reason)?;
-    repository::insert_report(&state.pool, auth.user_id, id, &payload.reason).await?;
+    repository::insert_report(&state.pool, auth.0.user_id, id, &payload.reason).await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -394,6 +413,12 @@ pub async fn report(
 /// gets `no-permission`, distinct from `not-found` for a puzzle that does not exist (D-12) — see
 /// `repository::soft_delete_puzzle` for the full three-way branch and its idempotence guarantee for
 /// a repeat delete by the same author.
+///
+/// Deliberately stays on `AuthUser`, NOT `ActiveUser` — this is a decision, not an oversight a
+/// future reviewer should "fix". D-13 and SPEC §4.6 both name exactly four routes blocked for a
+/// banned account (login, submit, complete, report); `delete` is not among them in either source.
+/// Removing one's own content is not an act of harm, and a banned author must still be able to do
+/// it — blocking `delete` too would be a scope expansion this plan has no mandate to make.
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
