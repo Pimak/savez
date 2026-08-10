@@ -95,7 +95,15 @@ async fn main() -> std::process::ExitCode {
                 profanity_cache,
             };
 
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], config.port));
+            // BIND_ADDR (`Config::bind_addr`, ADR 0009): (a) the default `127.0.0.1` preserves the
+            // historical bare-metal contract of a purely local listener; (b) inside the
+            // application container `0.0.0.0` is mandatory, otherwise the sibling `caddy`
+            // container cannot reach `app:15001` (`reverse_proxy app:15001` would fail with
+            // connection refused) — the container's network isolation, not the loopback address,
+            // is the real security boundary here; (c) the SC2 guarantee ("conteneur applicatif
+            // :15001 localhost-only") is upheld by the *absence* of a `ports:` key on the `app`
+            // service in `deploy/docker-compose.yml`, never by the internal listen address.
+            let addr = std::net::SocketAddr::from((config.bind_addr, config.port));
             let listener = tokio::net::TcpListener::bind(addr)
                 .await
                 .expect("failed to bind listener");

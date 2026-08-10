@@ -6,6 +6,8 @@ pub enum ConfigError {
     InvalidPort(String),
     #[error("invalid value for AUTH_MODE: {0:?}")]
     InvalidAuthMode(String),
+    #[error("invalid value for BIND_ADDR: {0:?}")]
+    InvalidBindAddr(String),
 }
 
 /// Phase 2 authentication switch (ROADMAP SC4). `Oracle` is the only functional mode in v1;
@@ -27,6 +29,7 @@ pub struct Config {
     pub official_api_url: String,
     pub port: u16,
     pub auth_mode: AuthMode,
+    pub bind_addr: std::net::IpAddr,
 }
 
 impl Config {
@@ -57,6 +60,15 @@ impl Config {
             },
             None => AuthMode::Oracle,
         };
+        // Optional-with-default, same convention as `port`/`auth_mode` above: an absent
+        // BIND_ADDR must stay inert (loopback, the historical bare-metal contract), while a
+        // present-but-invalid value is fail-fast rather than a silent fallback to loopback.
+        let bind_addr = match lookup("BIND_ADDR") {
+            Some(value) => value
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| ConfigError::InvalidBindAddr(value))?,
+            None => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        };
 
         Ok(Config {
             database_url,
@@ -64,6 +76,7 @@ impl Config {
             official_api_url,
             port,
             auth_mode,
+            bind_addr,
         })
     }
 
