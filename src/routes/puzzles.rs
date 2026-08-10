@@ -216,6 +216,12 @@ fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
 // key uniqueness is the one rule that needs a database round-trip, so it must run last — a
 // malformed short key must never consume a SQL query.
 //
+// The profanity-list read immediately below `decode_puzzle_data` is NOT itself a validation step
+// in this ordering — it is a resource acquisition (served from an in-memory cache in the common
+// case, 07-08-PLAN.md `<interfaces>`) that `validate_title` needs as a parameter to stay pure and
+// synchronous. Placing it right before `validate_title` (rather than at the top of the handler)
+// means a request that fails at `decode_puzzle_data` never even triggers this read.
+//
 // D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
 // `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs — a banned
 // caller never even reaches `decode_puzzle_data`.
@@ -232,7 +238,8 @@ pub async fn submit(
     crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
         .await?;
     let data = decode_puzzle_data(&payload.data)?;
-    let title = validation::validate_title(&payload.title)?;
+    let profanity = state.profanity_cache.get(&state.pool).await?;
+    let title = validation::validate_title(&payload.title, &profanity)?;
     let short_key = validation::validate_short_key(&payload.short_key)?;
     validation::validate_game_data(&data)?;
 
