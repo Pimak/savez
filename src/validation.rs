@@ -124,7 +124,10 @@ pub fn is_valid_item_code(code: &str) -> bool {
 /// lancement, l'objectif est de bloquer l'évident, la modération humaine gère le reste"). Returns
 /// the trimmed title on success: the trimmed form is what gets stored, never the raw wire value
 /// (the client itself trims before sending).
-pub fn validate_title(raw: &str, profanity: &crate::profanity::ProfanityList) -> Result<String, AppError> {
+pub fn validate_title(
+    raw: &str,
+    profanity: &crate::profanity::ProfanityList,
+) -> Result<String, AppError> {
     let trimmed = raw.trim();
     let char_count = trimmed.chars().count();
     if !(MIN_TITLE_LEN..=MAX_TITLE_LEN).contains(&char_count) {

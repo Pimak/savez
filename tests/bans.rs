@@ -245,7 +245,11 @@ async fn banned_name_cannot_login(pool: PgPool) {
     // `server`'s `.expect(0)` is verified again when it is dropped here: this is the explicit,
     // second proof (beyond the mount-time expectation) that zero requests reached the oracle.
     assert_eq!(
-        server.received_requests().await.expect("mock server logs requests").len(),
+        server
+            .received_requests()
+            .await
+            .expect("mock server logs requests")
+            .len(),
         0,
         "a banned pseudo must never consume an oracle call"
     );
@@ -260,8 +264,7 @@ async fn banned_user_can_still_read(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "read-banned-author").await;
     let author_token = common::jwt_for(author_id);
-    let submitted =
-        body_to_json(submit_puzzle(app.clone(), &author_token, "SwSwSwSw").await).await;
+    let submitted = body_to_json(submit_puzzle(app.clone(), &author_token, "SwSwSwSw").await).await;
     let short_key = submitted["shortKey"]
         .as_str()
         .expect("submitted shortKey is a string")
@@ -306,8 +309,7 @@ async fn banned_author_can_still_delete_own_puzzle(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "delete-banned-author").await;
     let author_token = common::jwt_for(author_id);
-    let submitted =
-        body_to_json(submit_puzzle(app.clone(), &author_token, "SpSpSpSp").await).await;
+    let submitted = body_to_json(submit_puzzle(app.clone(), &author_token, "SpSpSpSp").await).await;
     let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
 
     let moderator_id = common::register_test_user(&pool, "delete-banned-mod").await;

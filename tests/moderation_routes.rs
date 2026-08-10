@@ -42,7 +42,10 @@ async fn body_to_json(response: axum::response::Response) -> Value {
 /// bare 401/403. Every assertion below checks BOTH halves.
 async fn assert_error_code(response: axum::response::Response, expected_code: &str) {
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body_to_json(response).await, json!({ "error": expected_code }));
+    assert_eq!(
+        body_to_json(response).await,
+        json!({ "error": expected_code })
+    );
 }
 
 /// Generic request builder shared by every case below — an optional `x-token` header and an
@@ -349,8 +352,7 @@ async fn admin_is_accepted_everywhere(pool: PgPool) {
         json!({ "success": true, "freedShortKey": short_key })
     );
 
-    let ban_target_id =
-        common::register_test_user(&pool, "admin-ok-ban-target").await;
+    let ban_target_id = common::register_test_user(&pool, "admin-ok-ban-target").await;
     let app = savez::app(state.clone());
     let response = send(
         app,

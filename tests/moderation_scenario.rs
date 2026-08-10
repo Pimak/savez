@@ -210,13 +210,24 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
     // 07-02-PLAN.md `<interfaces>`): with `downloads` read as 0 before this increment, the
     // `downloads = 0 => NULL` rule still applies to this first response. A SECOND download is
     // needed to observe `difficulty` as a real, non-null ratio.
-    let first_download =
-        download(savez::app(state.clone()), &author_token, &puzzle_id.to_string()).await;
+    let first_download = download(
+        savez::app(state.clone()),
+        &author_token,
+        &puzzle_id.to_string(),
+    )
+    .await;
     assert_eq!(first_download.status(), StatusCode::OK);
-    assert_eq!(body_to_json(first_download).await["meta"]["difficulty"], Value::Null);
+    assert_eq!(
+        body_to_json(first_download).await["meta"]["difficulty"],
+        Value::Null
+    );
 
-    let download_response =
-        download(savez::app(state.clone()), &author_token, &puzzle_id.to_string()).await;
+    let download_response = download(
+        savez::app(state.clone()),
+        &author_token,
+        &puzzle_id.to_string(),
+    )
+    .await;
     assert_eq!(download_response.status(), StatusCode::OK);
     let downloaded = body_to_json(download_response).await;
     assert_eq!(downloaded["meta"]["completions"], json!(3));
@@ -234,7 +245,13 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
     // reason; after the third distinct pending report, hidden_at is set and hidden_by is NULL
     // (the automatic-threshold tri-state, distinct from a self-hide or a moderator's manual hide).
     for participant_token in &participant_tokens {
-        report(savez::app(state.clone()), participant_token, puzzle_id, "profane").await;
+        report(
+            savez::app(state.clone()),
+            participant_token,
+            puzzle_id,
+            "profane",
+        )
+        .await;
     }
     let (hidden_at, hidden_by) = hidden_state(&pool, puzzle_id).await;
     assert!(
@@ -267,16 +284,24 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
             .contains(&puzzle_id)
     );
     assert_eq!(
-        download(savez::app(state.clone()), &author_token, &puzzle_id.to_string())
-            .await
-            .status(),
+        download(
+            savez::app(state.clone()),
+            &author_token,
+            &puzzle_id.to_string()
+        )
+        .await
+        .status(),
         StatusCode::OK,
         "the puzzle's own author must still be able to download it while hidden"
     );
     assert_eq!(
-        download(savez::app(state.clone()), &moderator_token, &puzzle_id.to_string())
-            .await
-            .status(),
+        download(
+            savez::app(state.clone()),
+            &moderator_token,
+            &puzzle_id.to_string()
+        )
+        .await
+        .status(),
         StatusCode::OK,
         "a moderator must be able to download a hidden puzzle directly (ROADMAP SC2)"
     );
@@ -370,7 +395,9 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
         .expect("report queue is an array")
         .iter()
         .find(|e| e["puzzleId"] == json!(puzzle_id))
-        .expect("the queue must still list the now-resolved reports of this puzzle under status=all");
+        .expect(
+            "the queue must still list the now-resolved reports of this puzzle under status=all",
+        );
     assert_eq!(
         author_counter_entry["authorUpheldReports"],
         json!(3),
@@ -412,7 +439,10 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
         })),
     )
     .await;
-    assert_eq!(body_to_json(banned_submit).await, json!({ "error": "banned" }));
+    assert_eq!(
+        body_to_json(banned_submit).await,
+        json!({ "error": "banned" })
+    );
 
     let banned_complete = send(
         savez::app(state.clone()),
@@ -422,7 +452,10 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
         Some(json!({ "time": 10.0, "liked": false })),
     )
     .await;
-    assert_eq!(body_to_json(banned_complete).await, json!({ "error": "banned" }));
+    assert_eq!(
+        body_to_json(banned_complete).await,
+        json!({ "error": "banned" })
+    );
 
     let banned_report = send(
         savez::app(state.clone()),
@@ -432,12 +465,19 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
         Some(json!({ "reason": "profane" })),
     )
     .await;
-    assert_eq!(body_to_json(banned_report).await, json!({ "error": "banned" }));
+    assert_eq!(
+        body_to_json(banned_report).await,
+        json!({ "error": "banned" })
+    );
 
     assert_eq!(
-        download(savez::app(state.clone()), &author_token, &puzzle_id.to_string())
-            .await
-            .status(),
+        download(
+            savez::app(state.clone()),
+            &author_token,
+            &puzzle_id.to_string()
+        )
+        .await
+        .status(),
         StatusCode::OK,
         "a banned account must still be able to read (D-13 names only submit/complete/report/login)"
     );
@@ -473,7 +513,10 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .expect("count completions");
-    assert_eq!(orphaned_completions, 0, "no orphaned completions may remain");
+    assert_eq!(
+        orphaned_completions, 0,
+        "no orphaned completions may remain"
+    );
     let orphaned_reports: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM puzzle_reports WHERE puzzle_id = $1")
             .bind(puzzle_id as i32)
@@ -493,7 +536,10 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
     )
     .await;
     assert_eq!(lift_response.status(), StatusCode::OK);
-    assert_eq!(body_to_json(lift_response).await, json!({ "success": true }));
+    assert_eq!(
+        body_to_json(lift_response).await,
+        json!({ "success": true })
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
@@ -525,7 +571,12 @@ async fn full_report_review_sanction_scenario(pool: PgPool) {
         .as_array()
         .expect("log response is an array")
         .iter()
-        .map(|e| e["action"].as_str().expect("action is a string").to_string())
+        .map(|e| {
+            e["action"]
+                .as_str()
+                .expect("action is a string")
+                .to_string()
+        })
         .collect();
     // `GET /v1/moderation/log` returns newest-first (`created_at DESC, id DESC`) -- reverse to
     // read the actions back in the chronological order they actually happened.

@@ -447,15 +447,17 @@ async fn list_top_rated_orders_by_likes_then_completions(pool: PgPool) {
     // (short_key, [(liker_name, liked)]) -- one completion per entry.
     let high_likes = submit_puzzle(app.clone(), &token, "SgSgSgSg", "High Likes").await;
     let high_likes_id = high_likes["id"].as_i64().expect("id is a number");
-    for (name, liked) in [
-        ("tr-high-1", true),
-        ("tr-high-2", true),
-    ] {
+    for (name, liked) in [("tr-high-1", true), ("tr-high-2", true)] {
         let user_id = common::register_test_user(&pool, name).await;
         let user_token = common::jwt_for(user_id);
-        let call =
-            complete_request(app.clone(), Some(&user_token), &high_likes_id.to_string(), 10.0, liked)
-                .await;
+        let call = complete_request(
+            app.clone(),
+            Some(&user_token),
+            &high_likes_id.to_string(),
+            10.0,
+            liked,
+        )
+        .await;
         assert_eq!(call.status(), StatusCode::OK);
     }
 
@@ -480,9 +482,14 @@ async fn list_top_rated_orders_by_likes_then_completions(pool: PgPool) {
     for (i, liked) in [true, false].into_iter().enumerate() {
         let user_id = common::register_test_user(&pool, &format!("tr-low-{i}")).await;
         let user_token = common::jwt_for(user_id);
-        let call =
-            complete_request(app.clone(), Some(&user_token), &low_id.to_string(), 10.0, liked)
-                .await;
+        let call = complete_request(
+            app.clone(),
+            Some(&user_token),
+            &low_id.to_string(),
+            10.0,
+            liked,
+        )
+        .await;
         assert_eq!(call.status(), StatusCode::OK);
     }
 
