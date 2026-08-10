@@ -1062,3 +1062,274 @@ pub async fn resolve_report(
 
     Ok(resolved_ids)
 }
+
+/// Creates a new active ban row (D-11). Deliberately performs NO `SELECT` before the `INSERT` and
+/// NO automatic lifting of any pre-existing ban — D-11 locks the coexistence of multiple active
+/// bans on the same user as a fact of the data model, not an edge case to guard against. The
+/// returned row `id` is what `lift_ban` below targets: bans are lifted one row at a time, on
+/// purpose, never "all of them" implicitly.
+///
+/// A foreign-key violation on `user_id` (the account does not exist) maps to `AppError::NotFound`,
+/// the same constraint-driven mapping discipline `insert_user`/`insert_puzzle` already apply to
+/// their own unique-violation cases above.
+pub async fn ban_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    reason: &str,
+    moderator_id: Uuid,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<i32, AppError> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO user_bans (user_id, reason, moderator_id, expires_at)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        "#,
+        user_id,
+        reason,
+        moderator_id,
+        expires_at,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|err| match &err {
+        sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => AppError::NotFound,
+        _ => AppError::Database(err),
+    })?;
+
+    log_moderation_action(
+        pool,
+        moderator_id,
+        moderation_action::BAN_USER,
+        "user",
+        &user_id.to_string(),
+        Some(serde_json::json!({ "reason": reason, "expiresAt": expires_at })),
+    )
+    .await?;
+
+    Ok(row.id)
+}
+
+/// Lifts ONE ban row, by `id` (D-11): lifting is an explicit, targeted action, never "lift every
+/// active ban for this user" — a user with several coexisting bans (per `ban_user` above) keeps
+/// every OTHER one active. SPEC §4.6 requires every lift to be motivated, so `lift_reason` is a
+/// mandatory `&str`, never `Option`.
+///
+/// The `AND lifted_at IS NULL` guard makes a second `lift_ban` call on the same row a no-op that
+/// returns `AppError::NotFound` rather than silently overwriting the FIRST lift's `lift_reason`/
+/// `lift_moderator_id` — a ban's lift is itself an audit fact, recorded once.
+pub async fn lift_ban(
+    pool: &PgPool,
+    ban_id: i32,
+    lift_reason: &str,
+    lift_moderator_id: Uuid,
+) -> Result<(), AppError> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE user_bans
+        SET lifted_at = now(), lift_reason = $2, lift_moderator_id = $3
+        WHERE id = $1 AND lifted_at IS NULL
+        "#,
+        ban_id,
+        lift_reason,
+        lift_moderator_id,
+    )
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    log_moderation_action(
+        pool,
+        lift_moderator_id,
+        moderation_action::LIFT_BAN,
+        "ban",
+        &ban_id.to_string(),
+        Some(serde_json::json!({ "liftReason": lift_reason })),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Promotes/demotes a user's role (SPEC §4.6: the `admin` role explicitly grants "promotion/
+/// demotion of moderators"). Resolves the open question left by 07-RESEARCH.md's question n°3:
+/// this function IS in scope for this plan — without it there would be no way to create a second
+/// moderator in v1 short of manually editing the database, which would make the whole role system
+/// this phase builds effectively unusable. Exposed ONLY by the CLI (`savez mod promote`, plan
+/// 07-09) — SPEC defines no HTTP route for this right, and plan 07-10 must not invent one
+/// (T-07-28's mitigation).
+///
+/// Does NOT re-validate `role` against the closed set applicatively: the `users_role_check`
+/// CHECK constraint (D-12, migration 20260810000002) is the single source of truth for the value's
+/// validity, mirrored here only by mapping ITS violation to `AppError::BadPayload` — same
+/// constraint-is-truth discipline `insert_puzzle`/`insert_user` already apply to their own unique
+/// constraints. A nonexistent `user_id` maps to `AppError::NotFound`.
+pub async fn set_user_role(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: &str,
+    moderator_id: Uuid,
+) -> Result<(), AppError> {
+    let result = sqlx::query!("UPDATE users SET role = $1 WHERE id = $2", role, user_id)
+        .execute(pool)
+        .await
+        .map_err(|err| match &err {
+            sqlx::Error::Database(db_err) if db_err.is_check_violation() => AppError::BadPayload,
+            _ => AppError::Database(err),
+        })?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    log_moderation_action(
+        pool,
+        moderator_id,
+        moderation_action::SET_ROLE,
+        "user",
+        &user_id.to_string(),
+        Some(serde_json::json!({ "role": role })),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Permanently destroys a puzzle and every row that depends on it (SPEC §4.6, admin-only —
+/// enforced by the caller, same posture as `hide_puzzle`/`unhide_puzzle`). The ONLY transactional
+/// function in this entire phase: `puzzle_completions.puzzle_id`/`puzzle_reports.puzzle_id` are
+/// foreign keys with NO `ON DELETE CASCADE`, so the dependent rows must be deleted first, in a
+/// fixed order, inside one transaction — a mid-way failure without a transaction would leave
+/// orphaned `puzzle_completions`/`puzzle_reports` rows referencing a `puzzle_id` that no longer
+/// exists.
+///
+/// Order: completions, then reports, then the puzzle itself (returning its freed `short_key`),
+/// then the audit log write — INSIDE the same transaction (`log_moderation_action` accepts any
+/// `PgExecutor`, including `&mut Transaction`, precisely so this call can join the transaction
+/// rather than force a second, uncoordinated connection). Zero rows on the final `DELETE` (the
+/// puzzle never existed) rolls the whole transaction back and returns `AppError::NotFound` — no
+/// completions/reports deletion is left standing for a puzzle that was never actually purged.
+///
+/// The returned `short_key` is proof of release: `UNIQUE(short_key)` on `puzzles` makes it
+/// immediately available to a brand new submission. `moderation_log.target_id` is a bare `TEXT`
+/// with no foreign key to `puzzles` — the journal row survives the puzzle's own destruction, which
+/// is the entire point of an audit trail (T-07-30).
+pub async fn purge_puzzle(
+    pool: &PgPool,
+    puzzle_id: i32,
+    moderator_id: Uuid,
+) -> Result<String, AppError> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query!(
+        "DELETE FROM puzzle_completions WHERE puzzle_id = $1",
+        puzzle_id
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query!("DELETE FROM puzzle_reports WHERE puzzle_id = $1", puzzle_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let row = sqlx::query!(
+        "DELETE FROM puzzles WHERE id = $1 RETURNING short_key",
+        puzzle_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Err(AppError::NotFound);
+    };
+    let short_key = row.short_key;
+
+    log_moderation_action(
+        &mut *tx,
+        moderator_id,
+        moderation_action::DELETE_PUZZLE,
+        "puzzle",
+        &puzzle_id.to_string(),
+        Some(serde_json::json!({ "shortKey": short_key })),
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(short_key)
+}
+
+/// One row of the append-only moderation journal (SPEC §4.6, admin-only reading, paginated).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModerationLogEntry {
+    pub id: i32,
+    pub moderator_name: String,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub details: Option<serde_json::Value>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Reads the moderation journal, most recent first (`created_at DESC, id DESC` — the same
+/// deterministic tie-break discipline `list_new`/`list_top_rated` apply to their own ordering).
+/// SPEC §4.6 reserves this to `admin`; enforcement is the caller's responsibility (HTTP route/
+/// CLI), same posture as every other function in this file. Append-only reminder: nothing in this
+/// codebase ever `UPDATE`s or `DELETE`s a `moderation_log` row — this function only ever reads.
+pub async fn list_moderation_log(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ModerationLogEntry>, AppError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT l.id, u.name AS moderator_name, l.action, l.target_type, l.target_id, l.details,
+               l.created_at
+        FROM moderation_log l
+        JOIN users u ON u.id = l.moderator_id
+        ORDER BY l.created_at DESC, l.id DESC
+        LIMIT $1 OFFSET $2
+        "#,
+        limit,
+        offset
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ModerationLogEntry {
+            id: row.id,
+            moderator_name: row.moderator_name,
+            action: row.action,
+            target_type: row.target_type,
+            target_id: row.target_id,
+            details: row.details,
+            created_at: row.created_at,
+        })
+        .collect())
+}
+
+/// Resolves a user by UUID or pseudo, for the CLI (plan 07-09) — same two-stage resolution shape
+/// as `routes::puzzles::download`'s `short_key`-then-numeric-`id` fallback: try parsing as a
+/// `Uuid` first and confirm the row exists, otherwise fall back to an exact `name` lookup. Placed
+/// here (rather than in the CLI module plan 07-09 will add) so that plan never has to touch
+/// `src/repository.rs` or regenerate the `.sqlx` offline cache.
+pub async fn find_user_id(pool: &PgPool, name_or_id: &str) -> Result<Option<Uuid>, AppError> {
+    if let Ok(parsed) = Uuid::parse_str(name_or_id) {
+        let row = sqlx::query!("SELECT id FROM users WHERE id = $1", parsed)
+            .fetch_optional(pool)
+            .await?;
+        return Ok(row.map(|row| row.id));
+    }
+
+    let row = sqlx::query!("SELECT id FROM users WHERE name = $1", name_or_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|row| row.id))
+}

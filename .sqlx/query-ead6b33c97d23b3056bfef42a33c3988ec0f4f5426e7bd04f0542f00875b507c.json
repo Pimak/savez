@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM puzzle_reports WHERE puzzle_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ead6b33c97d23b3056bfef42a33c3988ec0f4f5426e7bd04f0542f00875b507c"
+}

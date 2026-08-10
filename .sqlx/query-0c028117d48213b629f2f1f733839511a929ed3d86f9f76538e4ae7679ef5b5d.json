@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM puzzles WHERE id = $1 RETURNING short_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "short_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "short_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0c028117d48213b629f2f1f733839511a929ed3d86f9f76538e4ae7679ef5b5d"
+}
