@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE puzzles SET hidden_at = NULL, hidden_by = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "222ceffb9db065a2695a12f7a0e0615a71d2c0759462fa5b9c48d5dc1a8f69f8"
+}

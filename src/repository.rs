@@ -420,10 +420,22 @@ pub async fn search_puzzles(
 /// longer come from a second correlated `LEFT JOIN` under aggregation — it is computed as
 /// `COUNT(...) FILTER (WHERE pc.user_id = $1) > 0` instead. See `list_new`'s doc comment for the
 /// full D-14/D-16/D-17/D-20 aggregate-formula rationale, unchanged here.
+///
+/// `is_moderator` (ROADMAP SC2, docs/adr/0002-hidden-by-tri-state.md): widens the visibility
+/// predicate to admit a puzzle hidden by ANY party (auto-hide, author self-hide, or a moderator's
+/// own manual hide) when the caller is at least `Role::Moderator` -- a moderator must be able to
+/// review/download the exact content that was reported, not just puzzles they personally hid.
+/// Callers: `routes::puzzles::download` passes `auth.role >= Role::Moderator`; `routes::
+/// puzzles::submit` passes `false` (it reads back a puzzle it just created for its own author,
+/// the question never arises). Deliberately NOT threaded into `list_new`/`list_top_rated`/
+/// `search_puzzles`: those are catalog views, and a moderator must not see hidden puzzles resurface
+/// there -- moderators reach hidden content only via direct access (this function/the download
+/// route) or the report queue (plan 07-06), never via the public catalog.
 pub async fn find_puzzle_by_id(
     pool: &PgPool,
     current_user_id: Uuid,
     id: i32,
+    is_moderator: bool,
 ) -> Result<Option<PuzzleFullData>, AppError> {
     let row = sqlx::query!(
         r#"
@@ -439,11 +451,12 @@ pub async fn find_puzzle_by_id(
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
         LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id
-        WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.id = $2
+        WHERE (p.hidden_at IS NULL OR p.author_id = $1 OR $3) AND p.id = $2
         GROUP BY p.id, u.name
         "#,
         current_user_id,
-        id
+        id,
+        is_moderator
     )
     .fetch_optional(pool)
     .await?;
@@ -540,10 +553,15 @@ pub async fn is_name_banned(pool: &PgPool, name: &str) -> Result<bool, AppError>
 ///
 /// D-15/ADR 0005: same point-lookup grouped-aggregation shape as `find_puzzle_by_id` — see that
 /// function's doc comment for the full rationale.
+///
+/// `is_moderator` (ROADMAP SC2): identical widening of the visibility predicate as
+/// `find_puzzle_by_id` — see that function's doc comment for the full rationale, including why
+/// the catalog-view listings deliberately do NOT gain this parameter.
 pub async fn find_puzzle_by_short_key(
     pool: &PgPool,
     current_user_id: Uuid,
     short_key: &str,
+    is_moderator: bool,
 ) -> Result<Option<PuzzleFullData>, AppError> {
     let row = sqlx::query!(
         r#"
@@ -559,11 +577,12 @@ pub async fn find_puzzle_by_short_key(
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
         LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id
-        WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.short_key = $2
+        WHERE (p.hidden_at IS NULL OR p.author_id = $1 OR $3) AND p.short_key = $2
         GROUP BY p.id, u.name
         "#,
         current_user_id,
-        short_key
+        short_key,
+        is_moderator
     )
     .fetch_optional(pool)
     .await?;
@@ -781,6 +800,105 @@ pub async fn soft_delete_puzzle(
         puzzle_id,
     )
     .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Hides a puzzle on behalf of a moderator (`POST /v1/moderation/puzzles/:id/hide`, `savez mod
+/// hide`, REQ-moderation). Shape borrowed from `soft_delete_puzzle` above (absent-row branch first,
+/// then the `UPDATE`) MINUS its "forbidden" branch: authorization already happened before this
+/// function is ever called -- the HTTP route requires `ModeratorUser`, and the CLI is inherently
+/// trusted (whoever can run `savez mod` already has full DB access).
+///
+/// docs/adr/0002-hidden-by-tri-state.md: `hidden_by` on this path is ALWAYS `moderator_id`, never
+/// `NULL` -- this function owns exclusively the "human moderator" third of the tri-state
+/// (`NULL` = automatic threshold hide, an author's own id = self-hide, a moderator's id = this).
+///
+/// D-07: hiding a puzzle and resolving the report(s) that led to it are two independent actions --
+/// this function does not touch `puzzle_reports` in any way; resolving a report (plan 07-06) does
+/// not unhide a puzzle either.
+///
+/// Idempotent for a repeat `hide_puzzle` call: the `UPDATE` below carries no `hidden_at IS NULL`
+/// guard, so re-hiding an already-hidden puzzle (whatever hid it before) simply reassigns
+/// `hidden_at`/`hidden_by` to this moderator's action -- the correct behavior for an explicit human
+/// action repeated deliberately, unlike D-05's automatic threshold hide which must NOT re-fire.
+/// The journal write below happens even when the state doesn't visibly change: the audit trail
+/// records the moderator's INTENT, not merely a state transition.
+pub async fn hide_puzzle(
+    pool: &PgPool,
+    puzzle_id: i32,
+    moderator_id: Uuid,
+    reason: Option<&str>,
+) -> Result<(), AppError> {
+    let row = sqlx::query!("SELECT id FROM puzzles WHERE id = $1", puzzle_id)
+        .fetch_optional(pool)
+        .await?;
+    if row.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    sqlx::query!(
+        "UPDATE puzzles SET hidden_at = now(), hidden_by = $1 WHERE id = $2",
+        moderator_id,
+        puzzle_id,
+    )
+    .execute(pool)
+    .await?;
+
+    log_moderation_action(
+        pool,
+        moderator_id,
+        moderation_action::HIDE_PUZZLE,
+        "puzzle",
+        &puzzle_id.to_string(),
+        reason.map(|r| serde_json::json!({ "reason": r })),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Unhides a puzzle on behalf of a moderator (`POST /v1/moderation/puzzles/:id/unhide`, `savez mod
+/// unhide`, REQ-moderation). Same shape/authorization posture as `hide_puzzle` above.
+///
+/// Clears BOTH `hidden_at` and `hidden_by` to `NULL` -- the puzzle simply becomes not-hidden again;
+/// a `hidden_by` value without a `hidden_at` would be meaningless under
+/// docs/adr/0002-hidden-by-tri-state.md's convention (the tri-state only has meaning while the
+/// puzzle IS hidden).
+///
+/// A no-op on an already-visible puzzle succeeds (idempotent, zero rows affected by the `UPDATE`
+/// but still a success from the caller's point of view) -- same posture as `hide_puzzle`'s
+/// repeat-call idempotence, and the journal write below still happens: the audit trail records
+/// the moderator's intent to unhide, regardless of whether the puzzle was actually hidden.
+pub async fn unhide_puzzle(
+    pool: &PgPool,
+    puzzle_id: i32,
+    moderator_id: Uuid,
+    reason: Option<&str>,
+) -> Result<(), AppError> {
+    let row = sqlx::query!("SELECT id FROM puzzles WHERE id = $1", puzzle_id)
+        .fetch_optional(pool)
+        .await?;
+    if row.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    sqlx::query!(
+        "UPDATE puzzles SET hidden_at = NULL, hidden_by = NULL WHERE id = $1",
+        puzzle_id,
+    )
+    .execute(pool)
+    .await?;
+
+    log_moderation_action(
+        pool,
+        moderator_id,
+        moderation_action::UNHIDE_PUZZLE,
+        "puzzle",
+        &puzzle_id.to_string(),
+        reason.map(|r| serde_json::json!({ "reason": r })),
+    )
     .await?;
 
     Ok(())
