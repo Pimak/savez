@@ -1,0 +1,16 @@
+[Unit]
+Description=Sauvegarde quotidienne PostgreSQL de savez vers un stockage S3-compatible
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/savez/deploy
+# EnvironmentFile= attend un format CLE=valeur sans guillemets ni `export`, exactement la forme
+# du squelette deploy/.env.example. Ce chemin est volontairement le même fichier que celui lu par
+# `env_file:` dans deploy/docker-compose.yml : une seule source de secrets sur la machine (D-07).
+EnvironmentFile=/opt/savez/deploy/.env
+ExecStart=/opt/savez/deploy/backup.sh
+
+# Pas de section Install ici : cette unité est déclenchée par savez-backup.timer, elle n'est
+# jamais activée/démarrée directement.

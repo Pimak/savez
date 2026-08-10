@@ -1,0 +1,14 @@
+[Unit]
+Description=Déclenchement quotidien de la sauvegarde PostgreSQL de savez
+
+[Timer]
+OnCalendar=daily
+# Rattrape une exécution manquée après une coupure du VPS -- précisément le scénario que la
+# sauvegarde existe pour couvrir.
+Persistent=true
+# Étale la charge et évite de taper le point de terminaison S3 à la seconde exacte.
+RandomizedDelaySec=30m
+Unit=savez-backup.service
+
+[Install]
+WantedBy=timers.target
