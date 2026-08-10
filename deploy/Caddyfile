@@ -1,0 +1,21 @@
+# Reverse proxy de production : terminaison TLS automatique (Let's Encrypt)
+# et routage vers le conteneur applicatif sur le réseau interne Compose.
+#
+# Placeholder de domaine avec défaut ci-dessous (D-05) : aucun nom de domaine
+# réel n'est choisi/acheté à ce stade. L'achat futur d'un vrai domaine ne
+# doit modifier QUE la valeur DOMAIN dans deploy/.env, JAMAIS ce fichier
+# versionné. Le nom retenu devra rester conforme à la contrainte de marque
+# du projet (voir DEC-naming/CON-trademark dans PROJECT.md).
+{$DOMAIN:votre-domaine.example} {
+    reverse_proxy app:15001
+}
+
+# Dashboard Uptime Kuma (D-08) : interne par défaut, non exposé à Internet --
+# `kuma` ne publie aucun port dans deploy/docker-compose.yml, seul ce bloc
+# (désactivé, commenté) est le geste nécessaire pour l'exposer publiquement.
+# Kuma assure sa propre authentification (login intégré), donc décommenter ce
+# bloc n'expose pas un service sans contrôle d'accès.
+#
+# status.{$DOMAIN} {
+#     reverse_proxy kuma:3001
+# }
