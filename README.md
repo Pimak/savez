@@ -24,7 +24,7 @@ Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with
 
 ## Development status
 
-The project has completed **phase 6 of 12** (complete shapez `ClientAPI` contract): all 21 real `T.backendErrors` wire codes, mandatory `x-token` authentication on every `/v1/puzzles/*` route, the all-HTTP-200 business-error convention (with its documented 5xx infrastructure-failure exception), full submission validation (emitters, goals, shape-key grammar, `shortKey`, title, building placement), per-user `completed`/`mine`, and author-reversible puzzle deletion. See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
+The project has completed **phase 8 of 12** (deployment artifacts): business logic and moderation (phase 7) plus a complete, locally smoke-tested deployment stack — Dockerfile, production Docker Compose (app + PostgreSQL + Caddy + Uptime Kuma), backup chain, bootstrap script, and recovery runbook (see [Deployment](#deployment)). See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
 
 ## Usage
 
@@ -38,8 +38,10 @@ default when no argument is given:
 > [!IMPORTANT]
 > This is a breaking change to the launch contract: any deployment script that previously invoked
 > the binary with no argument at all must now pass `serve` explicitly. See
-> `docs/adr/0004-cli-serve-subcommand.md` for the full rationale. The phase 8 Dockerfile and
-> systemd unit must invoke `savez serve`, not a bare `savez`.
+> `docs/adr/0004-cli-serve-subcommand.md` for the full rationale. The production `Dockerfile`
+> invokes `savez serve` via its `CMD` — there is no systemd unit for the application process
+> itself, which runs as a Docker Compose service; systemd only manages the daily backup timer
+> (see [Deployment](#deployment)).
 
 ### Command-line administration
 
@@ -94,6 +96,32 @@ server).
 
 Every step above must produce readable output, no panic, and no raw Rust error message — the
 moderation audit log (`savez mod log`) should faithfully reflect every action taken.
+
+## Deployment
+
+> [!NOTE]
+> No real deployment has happened yet, consistent with this project's Draft status: all artifacts
+> below are produced and smoke-tested locally against the real Docker Compose stack, but no VPS or
+> domain has been provisioned. See `.planning/STATE.md` for the explicit open checkpoint and its
+> deadline (before Phase 12).
+
+A container image is published to GHCR (`ghcr.io/pimak/savez`) on every `v*` tag by
+`.github/workflows/release.yml`, built from the multi-stage `Dockerfile` (musl builder →
+distroless, non-root, `CMD ["serve"]`).
+
+The reference deployment is Docker Compose, run from `deploy/`:
+
+```
+docker compose pull && docker compose up -d
+```
+
+Topology: Caddy terminates TLS (automatic via Let's Encrypt) and is the only service with
+published ports; the application container and PostgreSQL stay on the internal Compose network,
+never exposed to the host. PostgreSQL is backed up daily via `pg_dump` to S3-compatible object
+storage, with 30 days of retention.
+
+For provisioning a fresh VPS, or recovering from total server loss, follow
+`deploy/RESTORE.md` — the authoritative, step-by-step recovery runbook.
 
 ## License
 

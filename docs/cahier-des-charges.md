@@ -60,13 +60,13 @@ Le backend est développé et testé en premier contre le client officiel en mod
 |-----------|-------|------|
 | Langage | Rust (édition stable courante) | Binaire statique, faible empreinte, pérennité |
 | Framework HTTP | Axum + Tokio | Handlers, extracteurs, middlewares |
-| Base de données | SQLite via SQLx | Fichier unique (sauvegarde triviale), requêtes vérifiées à la compilation |
+| Base de données | PostgreSQL via SQLx (conteneur Docker Compose) | Requêtes vérifiées à la compilation ; pivot depuis SQLite acté par la révision Phase 3 de `DEC-stack` (voir PROJECT.md) |
 | Auth | `jsonwebtoken` (JWT) + `argon2` | Sessions et mots de passe |
 | Interop compression | `lz-str` | Compatibilité avec le `compressX64` du client (lz-string, variante EncodedURIComponent) |
 | Client HTTP sortant | `reqwest` | Appel de vérification vers `api.shapez.io` |
 | Qualité | `cargo clippy`, `thiserror` | Lint, erreurs typées à terme |
 
-**Cible de déploiement :** un binaire unique sur petit VPS Linux ; configuration par variables d'environnement (`DATABASE_URL`, `JWT_KEY`, `OFFICIAL_API_URL`, port).
+**Cible de déploiement :** un binaire musl statique et un conteneur PostgreSQL sibling, orchestrés par Docker Compose sur un petit VPS Linux ; configuration par variables d'environnement (`DATABASE_URL`, `JWT_KEY`, `OFFICIAL_API_URL`, port, `BIND_ADDR`) — voir §6.2.
 
 ### 4.2 Contrat d'API — compatibilité client shapez
 
@@ -216,7 +216,7 @@ Toute action de modération écrit une entrée dans `moderation_log` (qui, quoi,
 
 ## 6. Déploiement et exploitation
 
-Principe directeur : **le coût et la complexité d'exploitation sont des specs**, pas des détails — un serveur communautaire bénévole meurt de ses coûts récurrents et de sa charge de maintenance avant de mourir de ses bugs. L'architecture (binaire statique + SQLite) est choisie pour qu'une seule petite machine suffise pendant des années.
+Principe directeur : **le coût et la complexité d'exploitation sont des specs**, pas des détails — un serveur communautaire bénévole meurt de ses coûts récurrents et de sa charge de maintenance avant de mourir de ses bugs. L'architecture (binaire musl statique + conteneur PostgreSQL sibling, orchestrés par Docker Compose) est choisie pour qu'une seule petite machine suffise pendant des années.
 
 ### 6.1 Cible : un VPS unique
 
@@ -232,28 +232,31 @@ Principe directeur : **le coût et la complexité d'exploitation sont des specs*
 ### 6.2 Architecture de déploiement
 
 ```
-Internet ──► Caddy (:443, TLS auto) ──► shapez-puzzle-server (:15001, localhost only)
-                                              │
-                                              └── puzzles.sqlite ──► Litestream ──► S3
+Internet ──► Caddy (:80/:443, TLS auto) ──► savez (conteneur applicatif, :15001, non publié)
+                                                        │
+                                              PostgreSQL (réseau interne Compose,
+                                                   volume nommé, non publié)
+                                                        │
+                                              pg_dump quotidien ──► stockage objet
+                                                   S3-compatible (rétention 30 j)
 ```
 
-- **Caddy** en reverse proxy : deux lignes de Caddyfile, TLS Let's Encrypt automatique, HTTP/2. (Nginx + certbot possible, mais Caddy minimise la maintenance.)
-- **Le binaire** tourne en service **systemd** (`Restart=always`, utilisateur dédié non-root, `ProtectSystem=strict`) et n'écoute que sur localhost.
-- **SQLite + [Litestream](https://litestream.io/)** : réplication continue du fichier vers l'object storage. En cas de perte totale du VPS, restauration à quelques secondes près avec `litestream restore`. Complément : un dump quotidien (`sqlite3 .backup` + cron) versionné sur 30 jours, comme ceinture et bretelles.
-- **Endpoint `/healthz`** (à ajouter au backend, trivial) pour la supervision.
+- **Caddy** en reverse proxy : deux lignes de Caddyfile, TLS Let's Encrypt automatique, HTTP/2. Seul service dont les ports (80/443) sont publiés vers l'hôte.
+- **Le conteneur applicatif** (`savez serve`) tourne comme service **Docker Compose**, orchestré aux côtés d'un conteneur **PostgreSQL** sibling sur le réseau interne Compose, avec un volume nommé pour les données ; systemd ne sert plus qu'au minuteur de sauvegarde (`savez-backup.timer`), plus au binaire applicatif lui-même.
+- **PostgreSQL + `pg_dump`** : sauvegarde quotidienne (`pg_dump` compressé) téléversée vers un stockage objet S3-compatible, avec rétention de 30 jours — remplace le mécanisme de réplication continue prévu par l'architecture SQLite abandonnée au pivot PostgreSQL de la Phase 3 (voir `DEC-deployment-architecture`, PROJECT.md).
+- **Endpoint `/healthz`** pour la supervision (Caddy, UptimeRobot, Uptime Kuma).
 
 ### 6.3 Mise en production et mises à jour
 
-- **Build :** GitHub Actions compile le binaire Linux (`x86_64-unknown-linux-musl` — statique, zéro dépendance système) à chaque tag et publie une GitHub Release. Le binaire compilé aujourd'hui tournera tel quel dans dix ans, cohérent avec l'objectif de conservation.
-- **Déploiement :** `scp` du binaire + `systemctl restart` — un script de 10 lignes. Les migrations SQLx s'appliquent automatiquement au démarrage. Pas d'orchestrateur : la coupure d'une seconde au restart est acceptable pour ce service.
-- **Docker optionnel :** un `Dockerfile` (image `scratch` + binaire musl, ~10 Mo) est fourni pour qui préfère, mais n'est **pas** le mode de déploiement de référence — c'est une commodité pour les auto-hébergeurs tiers, dans l'esprit AGPL.
+- **Build :** GitHub Actions construit une image Docker depuis le binaire musl statique (`x86_64-unknown-linux-musl`, `Dockerfile` multi-étages vers une base distroless non-root) à chaque tag `v*`, et la publie sur GHCR (`ghcr.io/pimak/savez`). L'image construite aujourd'hui tournera tel quel dans dix ans, cohérent avec l'objectif de conservation.
+- **Déploiement :** `docker compose pull && docker compose up -d` depuis `deploy/` — Docker Compose est le mécanisme de déploiement principal, pas une commodité optionnelle, puisqu'il fait cohabiter le conteneur applicatif et son conteneur PostgreSQL sibling (voir `DEC-deployment-architecture`, révisée Phase 3). Les migrations SQLx s'appliquent automatiquement au démarrage du conteneur applicatif.
 
 ### 6.4 Supervision et exploitation courante
 
-Volontairement minimal :
+Volontairement minimal, double supervision décidée en Phase 8 (voir `docs/adr/0008-dual-monitoring-uptimerobot-kuma.md` pour le raisonnement complet) :
 
-- **Uptime :** un service gratuit type UptimeRobot (ou une instance Uptime Kuma) pingue `/healthz` et alerte par mail.
-- **Logs :** `tracing` vers stdout, capté par journald (`journalctl -u shapez-puzzle-server`). Pas de stack ELK.
+- **Uptime :** UptimeRobot (externe, gratuit) comme détecteur principal de panne totale du VPS, complété par une instance Uptime Kuma auto-hébergée (conteneur Compose) comme dashboard interne — un outil hébergé sur le même VPS que `savez` ne peut structurellement pas détecter sa propre panne totale.
+- **Logs :** `tracing` vers stdout, lus via `docker compose logs app` (`RUST_LOG=info` requis pour leur présence). Pas de stack ELK.
 - **Métriques :** au lancement, aucune. Si le besoin émerge : un endpoint Prometheus viendra plus tard.
 - **Charge de maintenance visée :** < 1 h/mois (mises à jour de sécurité OS via `unattended-upgrades`, vérification des sauvegardes).
 
@@ -261,8 +264,8 @@ Volontairement minimal :
 
 Deux scénarios couverts par conception :
 
-- **Perte du serveur :** nouveau VPS + script d'installation (Caddy, systemd, Litestream) + `litestream restore` ⇒ service restauré en < 1 h. Le script d'installation est versionné dans le repo (`deploy/`).
-- **Transmission du projet :** tout ce qui est nécessaire pour reprendre l'exploitation (scripts, Caddyfile, unités systemd, doc de restauration) vit dans le repo sous AGPL — n'importe quel membre de la communauté peut relancer le service à l'identique. C'est le pendant opérationnel de l'objectif de pérennité.
+- **Perte du serveur :** nouveau VPS + `deploy/install.sh` (Docker, Caddy, utilisateur dédié, pare-feu, minuteur de sauvegarde) + restauration `pg_dump` ⇒ service restauré en < 1 h. La procédure complète, pas à pas, fait l'objet du runbook `deploy/RESTORE.md`, document faisant autorité pour la reprise.
+- **Transmission du projet :** tout ce qui est nécessaire pour reprendre l'exploitation (Dockerfile, fichier Compose, Caddyfile, script d'installation, script de sauvegarde, unités systemd du minuteur, `deploy/RESTORE.md`) vit dans le repo sous AGPL — n'importe quel membre de la communauté peut relancer le service à l'identique. C'est le pendant opérationnel de l'objectif de pérennité.
 
 ## 7. Roadmap
 
