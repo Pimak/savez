@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM profanity_words WHERE word = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5277b5635db8e35b159ccdd1cba02f1c5e95ba59c6914bbdec6255dd6ab98f47"
+}

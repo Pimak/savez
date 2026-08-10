@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT word, lang FROM profanity_words\n        WHERE ($1::text IS NULL OR lang = $1)\n        ORDER BY lang, word\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "word",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "profanity_words",
+            "name": "word"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "lang",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "profanity_words",
+            "name": "lang"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "82030128f88a4eb3c5dc45ed5b852d0dd9e8e2eca9836e5adc7328e61c84c938"
+}

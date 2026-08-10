@@ -6,9 +6,9 @@ use sqlx::postgres::PgPoolOptions;
 /// Shared application state threaded through the Axum `Router` via `.with_state()`.
 ///
 /// Does NOT derive `Debug`: `jwt_key` is a secret and must never be trivially printable — same
-/// convention as `Config`. All six fields are cheap to clone: `PgPool` and `reqwest::Client` are
-/// internally `Arc`-backed, `AuthMode` is `Copy`, and `AuthCache` wraps a `moka::future::Cache`,
-/// itself internally `Arc`-backed.
+/// convention as `Config`. All seven fields are cheap to clone: `PgPool` and `reqwest::Client` are
+/// internally `Arc`-backed, `AuthMode` is `Copy`, and `AuthCache`/`ProfanityCache` both wrap a
+/// `moka::future::Cache`, itself internally `Arc`-backed.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -17,6 +17,7 @@ pub struct AppState {
     pub auth_mode: crate::config::AuthMode,
     pub http_client: reqwest::Client,
     pub auth_cache: crate::auth::cache::AuthCache,
+    pub profanity_cache: crate::profanity::ProfanityCache,
 }
 
 /// TTL for the role/ban cache wrapping every protected-route read of `users.role`/`user_bans`
@@ -25,6 +26,14 @@ pub struct AppState {
 /// non-arbitrary choice. Named constant, never an inline literal — same idiom as
 /// `ORACLE_HTTP_TIMEOUT` above.
 pub const AUTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// TTL for the profanity word-list cache (`crate::profanity::ProfanityCache`). Six times
+/// `AUTH_CACHE_TTL`: a word list carries no real-time security stakes the way a ban does (T-07-47
+/// is a performance concern, not a freshness one) — it changes very rarely, and a stale window up
+/// to a minute long costs nothing an attacker could exploit, unlike a stale ban (ADR 0006).
+/// Sixty seconds rather than an even longer value keeps "add a word, see it enforced within a
+/// minute, no restart" (07-08-PLAN.md `must_haves`) true without any cache invalidation machinery.
+pub const PROFANITY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Bound on every outbound HTTP call to the oracle (`api.shapez.io`). The official shapez client
 /// itself wraps each call in a 15s `timeoutPromise` (05-RESEARCH.md Assumptions Log A2); a shorter,

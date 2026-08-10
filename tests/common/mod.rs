@@ -19,6 +19,12 @@ pub const UNREACHABLE_ORACLE_URL: &str = "http://127.0.0.1:1";
 /// cache wrapper at a real TTL.
 pub const TEST_AUTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1);
 
+/// Same rationale as `TEST_AUTH_CACHE_TTL`, applied to the profanity word-list cache: a test that
+/// adds/removes a word via `profanity::add_word`/`remove_word` and immediately submits a title
+/// through the same `AppState` must observe the change without waiting out
+/// `db::PROFANITY_CACHE_TTL`'s real 60s window.
+pub const TEST_PROFANITY_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1);
+
 static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
 
 /// Installs the rustls `ring` crypto provider exactly once per test binary process. `main.rs`
@@ -50,6 +56,7 @@ pub fn test_state_with_oracle(pool: sqlx::PgPool, oracle_url: &str) -> savez::db
         auth_mode: savez::config::AuthMode::Oracle,
         http_client: savez::db::build_http_client().expect("test http client"),
         auth_cache: savez::auth::cache::AuthCache::new(TEST_AUTH_CACHE_TTL),
+        profanity_cache: savez::profanity::ProfanityCache::new(TEST_PROFANITY_CACHE_TTL),
     }
 }
 

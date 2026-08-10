@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO profanity_words (word, lang) VALUES ($1, $2) ON CONFLICT (word) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74090c62776a98060a815c3a7a38758bbb2ee5c9d61f4a5692a6e7cb50edaade"
+}
