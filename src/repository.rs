@@ -5,6 +5,63 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::routes::puzzles::{PuzzleFullData, PuzzleGameData, PuzzleMetadata, SubmitPuzzleRequest};
 
+/// Single source of truth for `moderation_log.action` string literals (07-05-PLAN.md
+/// `<interfaces>`). Plans 07-06 through 07-09 (report resolution, bans, role changes, rate-limit
+/// and profanity-list config CLI) all reuse these constants — no moderation-action literal should
+/// ever appear as a bare string anywhere else in this codebase.
+pub mod moderation_action {
+    pub const HIDE_PUZZLE: &str = "hide_puzzle";
+    pub const UNHIDE_PUZZLE: &str = "unhide_puzzle";
+    pub const DELETE_PUZZLE: &str = "delete_puzzle";
+    pub const RESOLVE_REPORT: &str = "resolve_report";
+    pub const BAN_USER: &str = "ban_user";
+    pub const LIFT_BAN: &str = "lift_ban";
+    pub const SET_ROLE: &str = "set_role";
+    pub const RATELIMIT_SET: &str = "ratelimit_set";
+    pub const PROFANITY_UPDATE: &str = "profanity_update";
+}
+
+/// SPEC §4.6 calls this threshold "configurable, default 3" — no D-01..D-20 decision asks for it
+/// to actually be runtime-configurable, and REQUIREMENTS.md/ROADMAP both hardcode "3" literally.
+/// Named constant instead of an inline literal so the single locked value is unambiguous and easy
+/// to find; if a future plan is asked to make it configurable (CLI/DB, mirroring D-01's rate-limit
+/// config table), this is the one place to change.
+/// TODO(post-v1): make configurable via the rate-limit-style CLI/DB config table if ever needed.
+pub const AUTO_HIDE_REPORT_THRESHOLD: i64 = 3;
+
+/// Appends one append-only row to `moderation_log` (SC4, DEC-moderation-model). `executor` is a
+/// generic `PgExecutor` rather than `&PgPool`: plan 07-06's permanent-delete flow must be able to
+/// log inside its own transaction (a `Transaction<'_, Postgres>` also implements `PgExecutor`),
+/// and this function must not force a fresh, uncoordinated pool connection in that case.
+///
+/// `moderation_log` receives ONLY `INSERT`s across this entire codebase — DEC-moderation-model's
+/// append-only guarantee: no function anywhere may ever emit an `UPDATE` or `DELETE` against this
+/// table. This is the sole write path.
+pub async fn log_moderation_action(
+    executor: impl sqlx::PgExecutor<'_>,
+    moderator_id: Uuid,
+    action: &str,
+    target_type: &str,
+    target_id: &str,
+    details: Option<serde_json::Value>,
+) -> Result<(), AppError> {
+    sqlx::query!(
+        r#"
+        INSERT INTO moderation_log (moderator_id, action, target_type, target_id, details)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+        moderator_id,
+        action,
+        target_type,
+        target_id,
+        details,
+    )
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
 /// Inserts a new puzzle row. `author_id` ALWAYS comes from the caller-supplied, server-verified
 /// JWT (`AuthUser.user_id` in `routes::puzzles::submit`) — never from `req` (there is none to
 /// take: `SubmitPuzzleRequest` has no author-shaped field, and even if it did this function would
@@ -593,14 +650,35 @@ pub async fn upsert_completion(
 /// Inserts a puzzle report (`POST /v1/puzzles/report/:id`, D-03/D-04). Does NOT bind the reports
 /// table's pending/upheld/rejected column: the schema `DEFAULT 'pending'` is the sole source of
 /// truth for a freshly created report, exactly as `insert_user` never binds `role`.
-/// TODO(Phase 7): REQ-moderation auto-hides a puzzle once it accumulates N distinct pending
-/// reports (default 3) and drives the review queue from there -- neither happens here, this
-/// function only records the report itself.
 ///
 /// Visibility predicate identical to `upsert_completion` above (D-10): a puzzle hidden by a third
 /// party cannot be reported by anyone but its own author, who in turn cannot reach the
 /// self-report check below because `insert_report` is never called by `routes::puzzles::report`
 /// on the reporter's own puzzle in the first place -- see that rejection immediately below.
+///
+/// D-05 auto-hide (REQ-moderation, 07-RESEARCH.md Pattern 3, verified live by the researcher):
+/// after the report `INSERT` commits, a single conditional `UPDATE` re-checks the threshold and
+/// applies the hide in the same statement, deliberately WITHOUT an explicit transaction -- D-05
+/// locks this shape. This is safe under PostgreSQL's default `READ COMMITTED` isolation: an
+/// `UPDATE`'s `WHERE` clause re-evaluates against the latest committed row version after it
+/// acquires the row lock, so two reports crossing the threshold concurrently each either win the
+/// lock and apply the write, or lose it, re-check `hidden_at IS NULL` (now false), and become a
+/// safe no-op -- no lost update, no double-write. A repeat report past the threshold (e.g. a 4th)
+/// is likewise idempotent: `hidden_at IS NULL` is already false, zero rows affected.
+///
+/// ADR 0002 (`docs/adr/0002-hidden-by-tri-state.md`): `hidden_by = NULL` on this path is the
+/// convention's "automatic" state -- distinct from an author's own self-hide (`hidden_by` = the
+/// author's id, Phase 6 `soft_delete_puzzle`) and a moderator's manual hide (`hidden_by` = the
+/// moderator's id, `hide_puzzle` below). Because the guard is `WHERE hidden_at IS NULL` (not
+/// `hidden_by IS NULL`), a puzzle the author already self-hid makes this `UPDATE` a no-op and
+/// `hidden_by` is NOT overwritten to `NULL` -- deliberate: the puzzle is already hidden either
+/// way, and erasing the author's own self-hide reason for no benefit would destroy real
+/// information. Proven by `auto_hide_preserves_author_self_hide` in `tests/moderation.rs`.
+///
+/// This path never writes to `moderation_log`: `moderation_log.moderator_id` is `NOT NULL
+/// REFERENCES users(id)`, and an automatic threshold-triggered hide has no moderator to attribute
+/// it to -- inventing one would be a fabricated audit trail. The auto-hide's own trace IS
+/// `hidden_by = NULL` on `puzzles` (the tri-state itself, per ADR 0002), not a journal row.
 pub async fn insert_report(
     pool: &PgPool,
     reporter_id: Uuid,
@@ -638,6 +716,23 @@ pub async fn insert_report(
         sqlx::Error::Database(db_err) if db_err.is_foreign_key_violation() => AppError::NotFound,
         _ => AppError::Database(err),
     })?;
+
+    // D-05: see this function's doc comment for the full correctness/idempotence argument. No
+    // separate `SELECT COUNT` on the Rust side -- the subquery inside `WHERE` is the locked
+    // mechanism, and no explicit transaction wraps this with the `INSERT` above.
+    sqlx::query!(
+        r#"
+        UPDATE puzzles
+        SET hidden_at = now(), hidden_by = NULL
+        WHERE id = $1
+          AND hidden_at IS NULL
+          AND (SELECT COUNT(*) FROM puzzle_reports WHERE puzzle_id = $1 AND status = 'pending') >= $2
+        "#,
+        puzzle_id,
+        AUTO_HIDE_REPORT_THRESHOLD,
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
