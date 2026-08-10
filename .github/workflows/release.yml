@@ -1,0 +1,44 @@
+# Publication d'image sur tag (GHCR).
+#
+# Deux points opérationnels non automatisables :
+# 1. Un paquet publié sur ghcr.io est PRIVE PAR DEFAUT, quelle que soit la visibilité du dépôt
+#    source. Après le premier tag construit par ce workflow, il faut lier le paquet au dépôt ou
+#    le passer public dans les réglages du paquet (onglet "Package settings" sur GHCR), sans
+#    quoi `docker compose pull` sur le VPS répondra "unauthorized" -- private by default, ce
+#    n'est pas un bug de ce workflow, c'est le comportement GHCR documenté.
+# 2. Ce workflow publie une IMAGE, pas une GitHub Release. Le déploiement se fait par
+#    `docker compose pull && docker compose up -d` (deploy/), jamais par copie de binaire.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: build musl image, push to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
