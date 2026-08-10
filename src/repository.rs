@@ -183,6 +183,92 @@ pub async fn list_mine(
         .collect())
 }
 
+/// Top-rated puzzle listing (`GET /v1/puzzles/list/top-rated`, REQ-business-logic, ROADMAP SC1).
+/// Same projection/mapping as `list_new` -- only the `ORDER BY` differs, ranking by the live-
+/// aggregated like count first (descending), the live-aggregated completion count second
+/// (descending), with the puzzle's own `id` (descending) as a final tie-break -- see the query
+/// below for the exact SQL. The trailing id-based tie-break mirrors the `created_at DESC, id DESC`
+/// convention already used by `list_new`/`search_puzzles` above -- without it, two puzzles tied on
+/// both likes and completions would come back in a non-deterministic order.
+///
+/// Visibility predicate: `WHERE p.hidden_at IS NULL` unconditionally, same rationale as `list_new`
+/// -- `top-rated` is a catalog view, not a direct-access or "mine" view, so it never admits the
+/// puzzle's own author to a hidden puzzle either (docs/adr/0002-hidden-by-tri-state.md).
+///
+/// D-15/ADR 0005: same live-aggregation derived-table join as `list_new` (see that function's doc
+/// comment for the full D-14/D-16/D-17/D-20 rationale) -- only the `ORDER BY` differs.
+pub async fn list_top_rated(
+    pool: &PgPool,
+    current_user_id: Uuid,
+) -> Result<Vec<PuzzleMetadata>, AppError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,
+               COALESCE(agg.completions, 0) AS "completions!",
+               COALESCE(agg.likes, 0)       AS "likes!",
+               agg.average_time,
+               CASE WHEN p.downloads = 0 THEN NULL
+                    ELSE (COALESCE(agg.completions, 0)::real / p.downloads)::real
+               END AS difficulty,
+               (pc.user_id IS NOT NULL) AS "completed!"
+        FROM puzzles p
+        JOIN users u ON u.id = p.author_id
+        LEFT JOIN (
+            SELECT puzzle_id,
+                   COUNT(*)                      AS completions,
+                   COUNT(*) FILTER (WHERE liked) AS likes,
+                   AVG(time_taken)::real         AS average_time
+            FROM puzzle_completions
+            GROUP BY puzzle_id
+        ) agg ON agg.puzzle_id = p.id
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        WHERE p.hidden_at IS NULL
+        ORDER BY COALESCE(agg.likes, 0) DESC, COALESCE(agg.completions, 0) DESC, p.id DESC
+        "#,
+        current_user_id
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| PuzzleMetadata {
+            id: row.id as u32,
+            short_key: row.short_key,
+            likes: row.likes as u32,
+            downloads: row.downloads as u32,
+            completions: row.completions as u32,
+            difficulty: row.difficulty,
+            average_time: row.average_time,
+            title: row.title,
+            author: row.author,
+            completed: row.completed,
+        })
+        .collect())
+}
+
+/// Increments `puzzles.downloads` by exactly 1 for a successful download (D-19: `downloads`
+/// remains the sole stored aggregate -- no download-log table exists to recompute it live, and
+/// creating one for this single purpose alone would be disproportionate, see 07-CONTEXT.md
+/// Deferred Ideas). The increment is evaluated entirely by PostgreSQL under the row's own lock (see
+/// the query below), never by a separate `SELECT` followed by an `UPDATE` on the Rust side -- the
+/// latter would lose increments under concurrent downloads of the same puzzle (T-07-06).
+///
+/// Called exactly once, from `routes::puzzles::download`, after the puzzle has already been
+/// resolved successfully -- never from `find_puzzle_by_id`/`find_puzzle_by_short_key` themselves,
+/// so that `routes::puzzles::submit` (which calls `find_puzzle_by_id` to read back the puzzle it
+/// just created) never counts a phantom download.
+pub async fn increment_downloads(pool: &PgPool, puzzle_id: i32) -> Result<i32, AppError> {
+    let row = sqlx::query!(
+        "UPDATE puzzles SET downloads = downloads + 1 WHERE id = $1 RETURNING downloads",
+        puzzle_id
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.downloads)
+}
+
 /// Title-substring search (`POST /v1/puzzles/search`, D-05/interfaces): filters on `p.title
 /// ILIKE '%<search_term>%'` only — `difficulty`/`duration` are validated upstream
 /// (`validation::validate_search_filters`) but do not contribute to any `WHERE` clause yet
