@@ -4,6 +4,7 @@ use axum::routing::{get, post};
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod db;
 pub mod error;
