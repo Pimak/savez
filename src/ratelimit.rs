@@ -161,6 +161,70 @@ pub async fn check_and_record(
     Ok(())
 }
 
+/// Upserts one `(route_class, window_seconds)` threshold (CLI-only: `savez mod ratelimit set`,
+/// plan 07-09). Never a `SELECT`-then-branch: the `UNIQUE (route_class, window_seconds)`
+/// constraint is the single source of truth on whether a row already exists, exactly the same
+/// `ON CONFLICT ... DO UPDATE` discipline `repository::insert_user`/`insert_puzzle` already apply
+/// to their own unique constraints -- never a TOCTOU-prone read-then-write.
+pub async fn set_config(
+    pool: &PgPool,
+    class: RouteClass,
+    window_seconds: i32,
+    limit_count: i32,
+    moderator_id: Uuid,
+) -> Result<(), AppError> {
+    let class_str = class.as_str();
+
+    sqlx::query!(
+        r#"
+        INSERT INTO rate_limit_config (route_class, window_seconds, limit_count)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (route_class, window_seconds) DO UPDATE SET limit_count = EXCLUDED.limit_count, updated_at = now()
+        "#,
+        class_str,
+        window_seconds,
+        limit_count,
+    )
+    .execute(pool)
+    .await?;
+
+    crate::repository::log_moderation_action(
+        pool,
+        moderator_id,
+        crate::repository::moderation_action::RATELIMIT_SET,
+        "ratelimit",
+        class_str,
+        Some(serde_json::json!({
+            "windowSeconds": window_seconds,
+            "limitCount": limit_count,
+        })),
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// Lists every configured rate-limit threshold, ordered by class then window (CLI-only: `savez mod
+/// ratelimit list`, plan 07-09). Returns `(route_class, window_seconds, limit_count)` tuples --
+/// this function has no HTTP-facing caller, so a dedicated response struct would add ceremony
+/// with no reader.
+pub async fn list_config(pool: &PgPool) -> Result<Vec<(String, i32, i32)>, AppError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT route_class, window_seconds, limit_count
+        FROM rate_limit_config
+        ORDER BY route_class, window_seconds
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.route_class, row.window_seconds, row.limit_count))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
