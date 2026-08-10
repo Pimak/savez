@@ -48,11 +48,6 @@ const REPORT_REASONS: [&str; 3] = ["profane", "unsolvable", "trolling"];
 const SEARCH_DIFFICULTIES: [&str; 4] = ["any", "easy", "medium", "hard"];
 const SEARCH_DURATIONS: [&str; 4] = ["any", "short", "medium", "long"];
 
-/// D-15/D-16: minimal, hardcoded EN+FR profanity list — NOT exhaustive, intentionally so.
-// TODO(Phase 7): REQ-moderation replaces this with a real, configurable EN/FR list. The wire error
-// code "profane-title" is already the final target name — no rename expected when Phase 7 lands.
-const PROFANE_WORDS: [&str; 6] = ["fuck", "shit", "bitch", "merde", "putain", "connard"];
-
 /// Literal port of `ShapeDefinition.isValidShortKeyInternal` (`shape_definition.js:192-244`, see
 /// 06-RESEARCH.md "D-14 Resolution"). Iterates over `chars()`, never bytes, so the length checks
 /// are correct even if a caller somehow supplies non-ASCII input (which will simply fail the
@@ -119,12 +114,17 @@ pub fn is_valid_item_code(code: &str) -> bool {
 }
 
 /// Port of the submit-dialog title gate (`puzzle_editor_review.js:102-109`): length 4-20 on the
-/// *trimmed* string, charset `[a-zA-Z0-9_- ]`, plus a minimal profanity filter (D-15/D-16) applied
-/// by exact-token match (not substring) to avoid the classic "Scunthorpe problem" false-positive —
-/// this weaker-than-substring matching is an accepted tradeoff for a minimal list, see
-/// `PROFANE_WORDS`'s `TODO(Phase 7)`. Returns the trimmed title on success: the trimmed form is
-/// what gets stored, never the raw wire value (the client itself trims before sending).
-pub fn validate_title(raw: &str) -> Result<String, AppError> {
+/// *trimmed* string, charset `[a-zA-Z0-9_- ]`, plus a profanity filter applied by exact-token
+/// match (not substring) to avoid the classic "Scunthorpe problem" false-positive. REQ-moderation/
+/// ROADMAP SC5: the list itself is no longer a hardcoded constant here — it is configurable, lives
+/// in the `profanity_words` table, and is threaded in by the caller as `profanity` (07-08-PLAN.md
+/// `<interfaces>`), so this function stays PURE and SYNCHRONOUS: it receives the list, it never
+/// fetches it. Token-exact matching is no longer a compromise accepted for a minimal built-in
+/// list — it is now an assumed property of the filter itself (SPEC §4.6: "un filtre naïf suffit au
+/// lancement, l'objectif est de bloquer l'évident, la modération humaine gère le reste"). Returns
+/// the trimmed title on success: the trimmed form is what gets stored, never the raw wire value
+/// (the client itself trims before sending).
+pub fn validate_title(raw: &str, profanity: &crate::profanity::ProfanityList) -> Result<String, AppError> {
     let trimmed = raw.trim();
     let char_count = trimmed.chars().count();
     if !(MIN_TITLE_LEN..=MAX_TITLE_LEN).contains(&char_count) {
@@ -139,7 +139,7 @@ pub fn validate_title(raw: &str) -> Result<String, AppError> {
 
     let lowered = trimmed.to_lowercase();
     for token in lowered.split([' ', '_', '-']) {
-        if PROFANE_WORDS.contains(&token) {
+        if profanity.contains_token(token) {
             return Err(AppError::ProfaneTitle);
         }
     }
@@ -334,15 +334,38 @@ mod tests {
 
     // --- validate_title ----------------------------------------------------------------------
 
+    /// A small fixed word set built inline per test (07-08-PLAN.md `<interfaces>`): `validate_title`
+    /// receives the profanity list as a parameter, so these tests stay entirely database-free.
+    fn test_profanity() -> crate::profanity::ProfanityList {
+        crate::profanity::ProfanityList::from_words(vec![
+            "fuck".to_string(),
+            "shit".to_string(),
+            "bitch".to_string(),
+            "merde".to_string(),
+            "putain".to_string(),
+            "connard".to_string(),
+        ])
+    }
+
     #[test]
     fn accepts_well_formed_titles() {
-        assert_eq!(validate_title("Test").unwrap(), "Test");
-        assert_eq!(validate_title("Test Puzzle").unwrap(), "Test Puzzle");
-        assert_eq!(validate_title("A_B-C 123").unwrap(), "A_B-C 123");
-        let twenty_chars = "a".repeat(20);
-        assert_eq!(validate_title(&twenty_chars).unwrap(), twenty_chars);
+        let profanity = test_profanity();
+        assert_eq!(validate_title("Test", &profanity).unwrap(), "Test");
         assert_eq!(
-            validate_title("  Test Puzzle  ").unwrap(),
+            validate_title("Test Puzzle", &profanity).unwrap(),
+            "Test Puzzle"
+        );
+        assert_eq!(
+            validate_title("A_B-C 123", &profanity).unwrap(),
+            "A_B-C 123"
+        );
+        let twenty_chars = "a".repeat(20);
+        assert_eq!(
+            validate_title(&twenty_chars, &profanity).unwrap(),
+            twenty_chars
+        );
+        assert_eq!(
+            validate_title("  Test Puzzle  ", &profanity).unwrap(),
             "Test Puzzle",
             "must return the trimmed form"
         );
@@ -350,27 +373,35 @@ mod tests {
 
     #[test]
     fn rejects_bad_title_format() {
-        assert!(matches!(validate_title("abc"), Err(AppError::BadTitle)));
+        let profanity = test_profanity();
+        assert!(matches!(
+            validate_title("abc", &profanity),
+            Err(AppError::BadTitle)
+        ));
         let twenty_one_chars = "a".repeat(21);
         assert!(matches!(
-            validate_title(&twenty_one_chars),
+            validate_title(&twenty_one_chars, &profanity),
             Err(AppError::BadTitle)
         ));
         assert!(matches!(
-            validate_title("Tést Puzzle"),
+            validate_title("Tést Puzzle", &profanity),
             Err(AppError::BadTitle)
         ));
         assert!(matches!(
-            validate_title("Test!Puzzle"),
+            validate_title("Test!Puzzle", &profanity),
             Err(AppError::BadTitle)
         ));
-        assert!(matches!(validate_title("    "), Err(AppError::BadTitle)));
+        assert!(matches!(
+            validate_title("    ", &profanity),
+            Err(AppError::BadTitle)
+        ));
     }
 
     #[test]
     fn rejects_profane_titles_case_insensitively() {
+        let profanity = test_profanity();
         assert!(matches!(
-            validate_title("FUCK You Puzzle"),
+            validate_title("FUCK You Puzzle", &profanity),
             Err(AppError::ProfaneTitle)
         ));
     }
