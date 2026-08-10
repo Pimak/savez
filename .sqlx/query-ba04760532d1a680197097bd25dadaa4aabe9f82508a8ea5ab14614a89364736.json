@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE user_bans\n        SET lifted_at = now(), lift_reason = $2, lift_moderator_id = $3\n        WHERE id = $1 AND lifted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ba04760532d1a680197097bd25dadaa4aabe9f82508a8ea5ab14614a89364736"
+}
