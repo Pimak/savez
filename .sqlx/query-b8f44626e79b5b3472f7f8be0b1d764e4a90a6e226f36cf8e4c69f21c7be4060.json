@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM users u\n            JOIN user_bans b ON b.user_id = u.id\n            WHERE u.name = $1\n              AND b.lifted_at IS NULL\n              AND (b.expires_at IS NULL OR b.expires_at > now())\n        ) AS \"banned!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "banned!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b8f44626e79b5b3472f7f8be0b1d764e4a90a6e226f36cf8e4c69f21c7be4060"
+}

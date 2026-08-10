@@ -444,6 +444,39 @@ pub async fn insert_user(pool: &PgPool, name: &str, verified_via: &str) -> Resul
     Ok(row.id)
 }
 
+/// D-13: `login` is one of the four routes D-13 names as blocked for a banned account -- this is
+/// the login-time ban check that runs before the account even has an authenticated identity.
+///
+/// D-11: same "currently banned" derivation as `auth::cache::fetch_role_and_ban`
+/// (`lifted_at IS NULL` AND `expires_at` is NULL or still in the future) -- several `user_bans`
+/// rows may coexist for one user, this only asks whether AT LEAST ONE currently applies.
+///
+/// Deliberately reads the database directly, never through `AppState.auth_cache`: that cache is
+/// keyed by `user_id`, and at this point in `login` no authenticated identity exists yet -- the
+/// pseudo is the only link between the request and an existing account. This is also the exact
+/// moment identity is established, so the freshest possible read is the correct one (ASVS V2),
+/// rather than accepting up to `AUTH_CACHE_TTL` of staleness for the sake of a cache that doesn't
+/// even have a key to read yet.
+pub async fn is_name_banned(pool: &PgPool, name: &str) -> Result<bool, AppError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM users u
+            JOIN user_bans b ON b.user_id = u.id
+            WHERE u.name = $1
+              AND b.lifted_at IS NULL
+              AND (b.expires_at IS NULL OR b.expires_at > now())
+        ) AS "banned!"
+        "#,
+        name
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.banned)
+}
+
 /// Resolves a puzzle by `short_key`. Same non-incrementing behavior as `find_puzzle_by_id`
 /// (D-06) and the SAME visibility predicate/rationale (D-10, docs/adr/0002-hidden-by-tri-state.md)
 /// — see that function's doc comment.

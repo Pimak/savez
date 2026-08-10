@@ -62,9 +62,17 @@ pub struct LoginResponse {
 ///    `steam-openid` must refuse registrations, never silently accept them without verification.
 /// 2. Validate the name BEFORE any network call: an invalid name must never consume an oracle
 ///    call (CON-official-api-usage).
-/// 3. Call the oracle exactly once, no retry -- no database write precedes this call (D-05).
-/// 4. Create the account.
-/// 5. Issue the server JWT. `jsonwebtoken`'s own error is never propagated to the client (it
+/// 3. Refuse a pseudo that is currently banned (D-13) BEFORE any network call: a banned account
+///    must never consume an oracle call either, for the same reason step 2 doesn't let an invalid
+///    name through first. This checks the pseudo, never a `user_id` -- `/v1/public/login` has no
+///    authenticated identity yet at this point, and the pseudo is the only stable link between
+///    this request and an existing account. Reads the database directly, bypassing the request-
+///    scoped role/ban cache entirely: that cache is keyed by an identity this step doesn't have
+///    yet, and identity establishment is precisely the moment that calls for the freshest read
+///    (ASVS V2) -- see the repository function called below for the full rationale.
+/// 4. Call the oracle exactly once, no retry -- no database write precedes this call (D-05).
+/// 5. Create the account.
+/// 6. Issue the server JWT. `jsonwebtoken`'s own error is never propagated to the client (it
 ///    could describe the signing key).
 ///
 /// Never logs `req.token`, `req.name`, nor the issued JWT.
@@ -77,6 +85,10 @@ pub async fn login(
     }
 
     validate_name(&req.name)?;
+
+    if repository::is_name_banned(&state.pool, &req.name).await? {
+        return Err(AppError::Banned);
+    }
 
     auth::oracle::verify_official_ownership(
         &state.http_client,
