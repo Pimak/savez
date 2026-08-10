@@ -381,7 +381,11 @@ pub async fn search(
 /// which every other rejection in this codebase avoids by construction. `download`'s
 /// `id_or_key.parse::<i32>()` is the existing analog this mirrors, just factored out since three
 /// handlers need it here instead of one.
-fn parse_puzzle_id(raw: &str) -> Result<i32, AppError> {
+///
+/// `pub(crate)` (07-10-PLAN.md `<interfaces>`): `routes::moderation`'s `resolve_report`/`hide`/
+/// `unhide`/`purge`/`lift_ban` handlers reuse this exact function for their own numeric path
+/// segments rather than redefining an equivalent.
+pub(crate) fn parse_puzzle_id(raw: &str) -> Result<i32, AppError> {
     raw.trim().parse::<i32>().map_err(|_| AppError::BadId)
 }
 
