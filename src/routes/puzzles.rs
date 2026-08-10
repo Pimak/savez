@@ -230,7 +230,10 @@ pub async fn submit(
         data,
     };
     let id = repository::insert_puzzle(&state.pool, &request, auth.0.user_id).await?;
-    let full = repository::find_puzzle_by_id(&state.pool, auth.0.user_id, id)
+    // `is_moderator = false`: this reads back a puzzle the caller just created for themselves --
+    // whether the caller happens to also be a moderator is irrelevant to this read (07-05-PLAN.md
+    // `<interfaces>`).
+    let full = repository::find_puzzle_by_id(&state.pool, auth.0.user_id, id, false)
         .await?
         .ok_or(AppError::NotFound)?;
     Ok(Json(full.meta))
@@ -259,22 +262,38 @@ pub async fn submit(
 ///
 /// Stays on `AuthUser`: reading is always allowed for a banned account (D-13 names only four
 /// blocked routes, and this isn't one of them).
+///
+/// `is_moderator` (ROADMAP SC2, 07-05-PLAN.md `<interfaces>`): derived from the cached role
+/// (at least the moderator threshold, cumulative per `auth::cache::Role`'s `Ord`), never from a
+/// client-supplied value -- a moderator can download any puzzle direct-access, including one
+/// hidden by a third party, so review/audit work is never blocked by the same visibility rule
+/// that protects ordinary users.
 pub async fn download(
     State(state): State<AppState>,
     Path(id_or_key): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<PuzzleFullData>, AppError> {
-    let mut full =
-        match repository::find_puzzle_by_short_key(&state.pool, auth.user_id, &id_or_key).await? {
-            Some(full) => full,
-            None => {
-                let by_id = match id_or_key.parse::<i32>() {
-                    Ok(id) => repository::find_puzzle_by_id(&state.pool, auth.user_id, id).await?,
-                    Err(_) => None,
-                };
-                by_id.ok_or(AppError::NotFound)?
-            }
-        };
+    let is_moderator = auth.role >= crate::auth::cache::Role::Moderator;
+    let mut full = match repository::find_puzzle_by_short_key(
+        &state.pool,
+        auth.user_id,
+        &id_or_key,
+        is_moderator,
+    )
+    .await?
+    {
+        Some(full) => full,
+        None => {
+            let by_id = match id_or_key.parse::<i32>() {
+                Ok(id) => {
+                    repository::find_puzzle_by_id(&state.pool, auth.user_id, id, is_moderator)
+                        .await?
+                }
+                Err(_) => None,
+            };
+            by_id.ok_or(AppError::NotFound)?
+        }
+    };
 
     full.meta.downloads =
         repository::increment_downloads(&state.pool, full.meta.id as i32).await? as u32;

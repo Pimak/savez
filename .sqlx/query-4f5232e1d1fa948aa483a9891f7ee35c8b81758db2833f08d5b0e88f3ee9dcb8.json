@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,\n               p.data as \"data: Json<PuzzleGameData>\",\n               COUNT(pc.id)                         AS \"completions!\",\n               COUNT(pc.id) FILTER (WHERE pc.liked)  AS \"likes!\",\n               AVG(pc.time_taken)::real              AS average_time,\n               CASE WHEN p.downloads = 0 THEN NULL\n                    ELSE (COUNT(pc.id)::real / p.downloads)::real\n               END AS difficulty,\n               (COUNT(pc.id) FILTER (WHERE pc.user_id = $1) > 0) AS \"completed!\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id\n        WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.id = $2\n        GROUP BY p.id, u.name\n        ",
+  "query": "\n        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,\n               p.data as \"data: Json<PuzzleGameData>\",\n               COUNT(pc.id)                         AS \"completions!\",\n               COUNT(pc.id) FILTER (WHERE pc.liked)  AS \"likes!\",\n               AVG(pc.time_taken)::real              AS average_time,\n               CASE WHEN p.downloads = 0 THEN NULL\n                    ELSE (COUNT(pc.id)::real / p.downloads)::real\n               END AS difficulty,\n               (COUNT(pc.id) FILTER (WHERE pc.user_id = $1) > 0) AS \"completed!\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id\n        WHERE (p.hidden_at IS NULL OR p.author_id = $1 OR $3) AND p.short_key = $2\n        GROUP BY p.id, u.name\n        ",
   "describe": {
     "columns": [
       {
@@ -103,7 +103,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Int4"
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
@@ -120,5 +121,5 @@
       null
     ]
   },
-  "hash": "53d118502c4b7448c0c6a2001c5bd85640b94c51bf07142c1dd59159e4c8da4e"
+  "hash": "4f5232e1d1fa948aa483a9891f7ee35c8b81758db2833f08d5b0e88f3ee9dcb8"
 }
