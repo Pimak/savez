@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT window_seconds, limit_count\n        FROM rate_limit_config\n        WHERE route_class = $1\n        ORDER BY window_seconds\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "window_seconds",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "rate_limit_config",
+            "name": "window_seconds"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "limit_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "rate_limit_config",
+            "name": "limit_count"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2940462133336aabcf8d76d3ae27a0839f62ad5de3ed9952a2299aa2dd1c5161"
+}
