@@ -58,6 +58,7 @@ async fn main() {
 
     let http_client = savez::db::build_http_client().expect("reqwest client build");
     let auth_cache = savez::auth::cache::AuthCache::new(savez::db::AUTH_CACHE_TTL);
+    let profanity_cache = savez::profanity::ProfanityCache::new(savez::db::PROFANITY_CACHE_TTL);
     let state = savez::db::AppState {
         pool,
         jwt_key: config.jwt_key,
@@ -65,6 +66,7 @@ async fn main() {
         auth_mode: config.auth_mode,
         http_client,
         auth_cache,
+        profanity_cache,
     };
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], config.port));
