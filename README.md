@@ -26,6 +26,43 @@ Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with
 
 The project has completed **phase 6 of 12** (complete shapez `ClientAPI` contract): all 21 real `T.backendErrors` wire codes, mandatory `x-token` authentication on every `/v1/puzzles/*` route, the all-HTTP-200 business-error convention (with its documented 5xx infrastructure-failure exception), full submission validation (emitters, goals, shape-key grammar, `shortKey`, title, building placement), per-user `completed`/`mine`, and author-reversible puzzle deletion. See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
 
+## Usage
+
+The binary has two explicit, mutually exclusive modes (D-04) — there is no longer an implicit
+default when no argument is given:
+
+- `savez serve` (or, in development, `cargo run -- serve`) launches the HTTP server.
+- `savez mod <action>` (or `cargo run -- mod <action>`) runs a single moderation action directly
+  against the database and exits — no running server required.
+
+> [!IMPORTANT]
+> This is a breaking change to the launch contract: any deployment script that previously invoked
+> the binary with no argument at all must now pass `serve` explicitly. See
+> `docs/adr/0004-cli-serve-subcommand.md` for the full rationale. The phase 8 Dockerfile and
+> systemd unit must invoke `savez serve`, not a bare `savez`.
+
+### Command-line administration
+
+`savez mod` covers the report queue, report resolution, hide/unhide, permanent deletion, bans,
+role promotion, the moderation audit log, rate-limit thresholds, and the profanity word list.
+Every action that writes to the database requires `--moderator <pseudo|uuid>` (no implicit
+default), and every write is recorded in the append-only moderation log.
+
+| Family | Example |
+|---|---|
+| Report queue | `savez mod reports --status pending` |
+| Report resolution | `savez mod resolve 12 upheld --moderator alice --notes "confirmed"` |
+| Hide / unhide | `savez mod hide 42 --reason "profane title" --moderator alice` |
+| Permanent deletion | `savez mod delete 42 --moderator alice` |
+| Ban / unban | `savez mod ban bob --reason spam --expires-in 7d --moderator alice` |
+| Role promotion | `savez mod promote bob moderator --moderator alice` |
+| Audit log | `savez mod log --limit 50` |
+| Rate-limit thresholds | `savez mod ratelimit set write --window 3600 --limit 5 --moderator alice` |
+| Profanity word list | `savez mod profanity add merde --lang fr --moderator alice` |
+
+Run `savez mod --help` (or `savez mod <subcommand> --help`) for the full argument list of every
+action.
+
 ## License
 
 This backend is distributed under the **AGPL-3.0** license (see `LICENSE`): anyone
