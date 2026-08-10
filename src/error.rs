@@ -63,6 +63,12 @@ pub enum AppError {
     /// currently-active variant covering `submit`/`complete`/`report`.
     #[error("user is banned")]
     Banned,
+    /// D-01/D-02 rate limiting (`src/ratelimit.rs`). Wire code `ratelimit`, not the `bad-payload`
+    /// literal used by `docs/cahier-des-charges.md` §4.6 and `REQUIREMENTS.md` -- see
+    /// `docs/adr/0007-ratelimit-wire-code.md` for the supersession rationale (the taxonomy's own
+    /// `ratelimit` code is a strictly better semantic match, per ADR 0003's maintenance rule).
+    #[error("rate limit exceeded")]
+    RateLimited,
 }
 
 impl AppError {
@@ -96,6 +102,7 @@ impl AppError {
             AppError::DuplicateReport => "bad-payload",
             AppError::NoPermission => "no-permission",
             AppError::Banned => "banned",
+            AppError::RateLimited => "ratelimit",
         }
     }
 }
@@ -229,6 +236,7 @@ mod tests {
             AppError::DuplicateReport,
             AppError::NoPermission,
             AppError::Banned,
+            AppError::RateLimited,
         ]
     }
 
