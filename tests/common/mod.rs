@@ -11,6 +11,14 @@ pub const TEST_JWT_KEY: &str = "test-jwt-key-not-a-secret";
 /// detail — no test may ever reach the official service (CON-official-api-usage).
 pub const UNREACHABLE_ORACLE_URL: &str = "http://127.0.0.1:1";
 
+/// A deliberately tiny TTL for every `AppState` built by `test_state`/`test_state_with_oracle`.
+/// Without this, a test that bans a user directly in `user_bans` and then immediately calls a
+/// route through the same `AppState` would observe a stale pre-ban cache entry (D-09's whole
+/// point) and become flaky/order-dependent. The cache mechanism itself (D-09/D-10's TTL-bounded
+/// staleness) is proven separately by a dedicated integration test file, which builds its own
+/// cache wrapper at a real TTL.
+pub const TEST_AUTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1);
+
 static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
 
 /// Installs the rustls `ring` crypto provider exactly once per test binary process. `main.rs`
@@ -41,6 +49,7 @@ pub fn test_state_with_oracle(pool: sqlx::PgPool, oracle_url: &str) -> savez::db
         official_api_url: oracle_url.to_string(),
         auth_mode: savez::config::AuthMode::Oracle,
         http_client: savez::db::build_http_client().expect("test http client"),
+        auth_cache: savez::auth::cache::AuthCache::new(TEST_AUTH_CACHE_TTL),
     }
 }
 
@@ -68,4 +77,43 @@ pub fn jwt_for(user_id: uuid::Uuid) -> String {
         savez::auth::jwt::DEFAULT_LIFETIME_SECS,
     )
     .expect("issue test jwt")
+}
+
+/// Same as `register_test_user`, but inserts a specific `role` directly — the `users_role_check`
+/// CHECK constraint (D-12, migration 20260810000002) still validates the value either way, so an
+/// invalid `role` argument fails the same as it would through any other write path.
+pub async fn register_test_user_with_role(
+    pool: &sqlx::PgPool,
+    name: &str,
+    role: &str,
+) -> uuid::Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (name, verified_via, role) VALUES ($1, 'test-fixture', $2) RETURNING id",
+    )
+    .bind(name)
+    .bind(role)
+    .fetch_one(pool)
+    .await
+    .expect("insert test user with role")
+}
+
+/// Inserts a row directly into `user_bans` (bypassing any CLI/HTTP ban flow entirely, none of
+/// which exist yet in this plan) and returns its `id` — needed by a later plan's ban-lifting
+/// tests. `expires_at: None` produces a permanent ban; `Some(...)` a temporary one, mirroring
+/// D-11's derivation (`lifted_at IS NULL AND (expires_at IS NULL OR expires_at > now())`).
+pub async fn ban_test_user(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    moderator_id: uuid::Uuid,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> i32 {
+    sqlx::query_scalar(
+        "INSERT INTO user_bans (user_id, reason, moderator_id, expires_at) VALUES ($1, 'test-fixture', $2, $3) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(moderator_id)
+    .bind(expires_at)
+    .fetch_one(pool)
+    .await
+    .expect("insert test ban")
 }
