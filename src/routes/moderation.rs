@@ -48,13 +48,19 @@ const MAX_LIMIT: i64 = 200;
 fn parse_limit_offset(limit: Option<&str>, offset: Option<&str>) -> Result<(i64, i64), AppError> {
     let limit = match limit {
         None => DEFAULT_LIMIT,
-        Some(raw) => raw.trim().parse::<i64>().map_err(|_| AppError::BadPayload)?,
+        Some(raw) => raw
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| AppError::BadPayload)?,
     }
     .clamp(1, MAX_LIMIT);
 
     let offset = match offset {
         None => 0,
-        Some(raw) => raw.trim().parse::<i64>().map_err(|_| AppError::BadPayload)?,
+        Some(raw) => raw
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| AppError::BadPayload)?,
     }
     .max(0);
 
@@ -250,16 +256,17 @@ pub async fn ban(
     // Protocol` synthesizes the same 500 the ordinary database-failure variant produces elsewhere
     // in this codebase, without falsely implying a specific pool/connection cause that never
     // actually occurred.
-    let target_state = state
-        .auth_cache
-        .get(&state.pool, target_id)
-        .await
-        .map_err(|err| match err {
-            CacheFetchError::UnknownUser => AppError::NotFound,
-            CacheFetchError::Database => {
-                AppError::Database(sqlx::Error::Protocol("auth cache read failed".into()))
-            }
-        })?;
+    let target_state =
+        state
+            .auth_cache
+            .get(&state.pool, target_id)
+            .await
+            .map_err(|err| match err {
+                CacheFetchError::UnknownUser => AppError::NotFound,
+                CacheFetchError::Database => {
+                    AppError::Database(sqlx::Error::Protocol("auth cache read failed".into()))
+                }
+            })?;
     if target_state.role >= auth.0.role {
         return Err(AppError::NoPermission);
     }
@@ -272,7 +279,9 @@ pub async fn ban(
         payload.expires_at,
     )
     .await?;
-    Ok(Json(serde_json::json!({ "success": true, "banId": ban_id })))
+    Ok(Json(
+        serde_json::json!({ "success": true, "banId": ban_id }),
+    ))
 }
 
 /// `POST /v1/moderation/users/{id}/lift-ban` (admin). `{id}` here is the `user_bans.id` ROW

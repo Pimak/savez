@@ -140,12 +140,9 @@ async fn word_removed_at_runtime_is_accepted(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "profanity-removed-author").await;
     let token = common::jwt_for(author_id);
-    let moderator_id = common::register_test_user_with_role(
-        &pool,
-        "profanity-removed-moderator",
-        "moderator",
-    )
-    .await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "profanity-removed-moderator", "moderator")
+            .await;
 
     // "moron" is part of the seed -- rejected first.
     let first = submit_titled_puzzle(app.clone(), &token, "RrRrRrRr", "Moron Puzzle").await;
@@ -195,9 +192,12 @@ async fn profanity_change_is_logged(pool: PgPool) {
         .await
         .expect("remove_word must succeed");
 
-    let logged =
-        moderation_log_count(&pool, "zzzlogword", repository::moderation_action::PROFANITY_UPDATE)
-            .await;
+    let logged = moderation_log_count(
+        &pool,
+        "zzzlogword",
+        repository::moderation_action::PROFANITY_UPDATE,
+    )
+    .await;
     assert_eq!(
         logged, 2,
         "add_word and remove_word must each append their own moderation_log row"
@@ -230,7 +230,10 @@ async fn add_existing_word_is_a_noop(pool: PgPool) {
     let inserted = profanity::add_word(&pool, "fuck", "en", moderator_id)
         .await
         .expect("add_word must succeed even as a no-op");
-    assert!(!inserted, "adding an already-present word must return false");
+    assert!(
+        !inserted,
+        "adding an already-present word must return false"
+    );
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM profanity_words WHERE word = 'fuck'")
         .fetch_one(&pool)

@@ -44,8 +44,12 @@ pub async fn list(
     Path(category): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Read)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.user_id,
+        crate::ratelimit::RouteClass::Read,
+    )
+    .await?;
     match category.as_str() {
         "new" => Ok(Json(repository::list_new(&state.pool, auth.user_id).await?)),
         "mine" => Ok(Json(
@@ -235,8 +239,12 @@ pub async fn submit(
     auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<SubmitPuzzlePayload>,
 ) -> Result<Json<PuzzleMetadata>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.0.user_id,
+        crate::ratelimit::RouteClass::Write,
+    )
+    .await?;
     let data = decode_puzzle_data(&payload.data)?;
     let profanity = state.profanity_cache.get(&state.pool).await?;
     let title = validation::validate_title(&payload.title, &profanity)?;
@@ -294,8 +302,12 @@ pub async fn download(
     Path(id_or_key): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<PuzzleFullData>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Read)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.user_id,
+        crate::ratelimit::RouteClass::Read,
+    )
+    .await?;
     let is_moderator = auth.role >= crate::auth::cache::Role::Moderator;
     let mut full = match repository::find_puzzle_by_short_key(
         &state.pool,
@@ -362,8 +374,12 @@ pub async fn search(
     auth: crate::auth::extractor::AuthUser,
     Json(payload): Json<SearchRequest>,
 ) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Read)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.user_id,
+        crate::ratelimit::RouteClass::Read,
+    )
+    .await?;
     validation::validate_search_filters(
         &payload.search_term,
         &payload.difficulty,
@@ -431,8 +447,12 @@ pub async fn complete(
     auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<CompleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.0.user_id,
+        crate::ratelimit::RouteClass::Write,
+    )
+    .await?;
     let id = parse_puzzle_id(&id)?;
     if !payload.time.is_finite() || payload.time <= 0.0 {
         return Err(AppError::BadPayload);
@@ -455,8 +475,12 @@ pub async fn report(
     auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<ReportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.0.user_id,
+        crate::ratelimit::RouteClass::Write,
+    )
+    .await?;
     let id = parse_puzzle_id(&id)?;
     validation::validate_report_reason(&payload.reason)?;
     repository::insert_report(&state.pool, auth.0.user_id, id, &payload.reason).await?;
@@ -486,8 +510,12 @@ pub async fn delete(
     Path(id): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Write)
-        .await?;
+    crate::ratelimit::check_and_record(
+        &state.pool,
+        auth.user_id,
+        crate::ratelimit::RouteClass::Write,
+    )
+    .await?;
     let id = parse_puzzle_id(&id)?;
     repository::soft_delete_puzzle(&state.pool, id, auth.user_id).await?;
     Ok(Json(serde_json::json!({ "success": true })))

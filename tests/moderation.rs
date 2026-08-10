@@ -214,7 +214,12 @@ async fn report_rows_for(pool: &PgPool, puzzle_id: i32, reason: &str) -> Vec<(i3
 /// preservation test below: both scenarios require pending reports to exist against a puzzle that
 /// is ALREADY hidden, which `insert_report`'s D-10 visibility guard correctly refuses for any
 /// non-author caller through the real HTTP/repository path.
-async fn insert_pending_report_row(pool: &PgPool, reporter_id: uuid::Uuid, puzzle_id: i32, reason: &str) {
+async fn insert_pending_report_row(
+    pool: &PgPool,
+    reporter_id: uuid::Uuid,
+    puzzle_id: i32,
+    reason: &str,
+) {
     sqlx::query("INSERT INTO puzzle_reports (user_id, puzzle_id, reason) VALUES ($1, $2, $3)")
         .bind(reporter_id)
         .bind(puzzle_id)
@@ -256,7 +261,10 @@ async fn build_auto_hidden_puzzle(pool: &PgPool, app: axum::Router) -> (i32, uui
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Reported Puzzle").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id is a number") as i32;
 
-    for (i, reason) in ["trolling", "profane", "unsolvable"].into_iter().enumerate() {
+    for (i, reason) in ["trolling", "profane", "unsolvable"]
+        .into_iter()
+        .enumerate()
+    {
         let response = report_by_new_user(
             pool,
             app.clone(),
@@ -273,7 +281,10 @@ async fn build_auto_hidden_puzzle(pool: &PgPool, app: axum::Router) -> (i32, uui
         hidden_at.is_some(),
         "fixture setup must actually auto-hide the puzzle"
     );
-    assert_eq!(hidden_by, None, "fixture setup must be the automatic (NULL) hide");
+    assert_eq!(
+        hidden_by, None,
+        "fixture setup must be the automatic (NULL) hide"
+    );
 
     (puzzle_id, author_id, author_token)
 }
@@ -290,9 +301,23 @@ async fn auto_hide_does_not_fire_below_threshold(pool: PgPool) {
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Below Threshold").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    let r1 = report_by_new_user(&pool, app.clone(), "below-threshold-reporter-1", puzzle_id, "trolling").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "below-threshold-reporter-1",
+        puzzle_id,
+        "trolling",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
-    let r2 = report_by_new_user(&pool, app.clone(), "below-threshold-reporter-2", puzzle_id, "profane").await;
+    let r2 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "below-threshold-reporter-2",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r2.status(), StatusCode::OK);
 
     let (hidden_at, hidden_by) = hidden_state(&pool, puzzle_id).await;
@@ -311,13 +336,27 @@ async fn auto_hide_fires_at_third_distinct_pending_report(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "third-report-author").await;
     let author_token = common::jwt_for(author_id);
-    let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Third Report Puzzle").await;
+    let meta = submit_puzzle(
+        app.clone(),
+        &author_token,
+        "CuCuCuCu",
+        "Third Report Puzzle",
+    )
+    .await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    for (i, reason) in ["trolling", "profane", "unsolvable"].into_iter().enumerate() {
-        let response =
-            report_by_new_user(&pool, app.clone(), &format!("third-report-reporter-{i}"), puzzle_id, reason)
-                .await;
+    for (i, reason) in ["trolling", "profane", "unsolvable"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = report_by_new_user(
+            &pool,
+            app.clone(),
+            &format!("third-report-reporter-{i}"),
+            puzzle_id,
+            reason,
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -340,13 +379,27 @@ async fn auto_hide_is_idempotent_on_fourth_report(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "fourth-report-author").await;
     let author_token = common::jwt_for(author_id);
-    let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Fourth Report Puzzle").await;
+    let meta = submit_puzzle(
+        app.clone(),
+        &author_token,
+        "CuCuCuCu",
+        "Fourth Report Puzzle",
+    )
+    .await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    for (i, reason) in ["trolling", "profane", "unsolvable"].into_iter().enumerate() {
-        let response =
-            report_by_new_user(&pool, app.clone(), &format!("fourth-report-reporter-{i}"), puzzle_id, reason)
-                .await;
+    for (i, reason) in ["trolling", "profane", "unsolvable"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = report_by_new_user(
+            &pool,
+            app.clone(),
+            &format!("fourth-report-reporter-{i}"),
+            puzzle_id,
+            reason,
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::OK);
     }
     let (hidden_at_after_third, hidden_by_after_third) = hidden_state(&pool, puzzle_id).await;
@@ -417,9 +470,23 @@ async fn resolved_reports_do_not_count_toward_threshold(pool: PgPool) {
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Resolved Reports").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    let r1 = report_by_new_user(&pool, app.clone(), "resolved-reports-reporter-1", puzzle_id, "trolling").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolved-reports-reporter-1",
+        puzzle_id,
+        "trolling",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
-    let r2 = report_by_new_user(&pool, app.clone(), "resolved-reports-reporter-2", puzzle_id, "profane").await;
+    let r2 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolved-reports-reporter-2",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r2.status(), StatusCode::OK);
 
     // Directly resolve one pending report to `upheld` BEFORE the 3rd arrives -- only `pending`
@@ -433,7 +500,14 @@ async fn resolved_reports_do_not_count_toward_threshold(pool: PgPool) {
     .await
     .expect("resolve one report to upheld");
 
-    let r3 = report_by_new_user(&pool, app.clone(), "resolved-reports-reporter-3", puzzle_id, "unsolvable").await;
+    let r3 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolved-reports-reporter-3",
+        puzzle_id,
+        "unsolvable",
+    )
+    .await;
     assert_eq!(r3.status(), StatusCode::OK);
 
     let (hidden_at, hidden_by) = hidden_state(&pool, puzzle_id).await;
@@ -456,7 +530,8 @@ async fn moderator_hide_sets_hidden_by_to_moderator(pool: PgPool) {
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Manual Hide Puzzle").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    let moderator_id = common::register_test_user_with_role(&pool, "manual-hide-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "manual-hide-moderator", "moderator").await;
 
     repository::hide_puzzle(&pool, puzzle_id, moderator_id, Some("policy violation"))
         .await
@@ -470,7 +545,8 @@ async fn moderator_hide_sets_hidden_by_to_moderator(pool: PgPool) {
         "manual hide must attribute hidden_by to the acting moderator, never NULL"
     );
 
-    let logged = moderation_log_count(&pool, puzzle_id, repository::moderation_action::HIDE_PUZZLE).await;
+    let logged =
+        moderation_log_count(&pool, puzzle_id, repository::moderation_action::HIDE_PUZZLE).await;
     assert_eq!(
         logged, 1,
         "hide_puzzle must append exactly one moderation_log row with action = hide_puzzle"
@@ -484,10 +560,17 @@ async fn moderator_unhide_clears_hidden_state_and_logs(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "manual-unhide-author").await;
     let author_token = common::jwt_for(author_id);
-    let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Manual Unhide Puzzle").await;
+    let meta = submit_puzzle(
+        app.clone(),
+        &author_token,
+        "CuCuCuCu",
+        "Manual Unhide Puzzle",
+    )
+    .await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    let moderator_id = common::register_test_user_with_role(&pool, "manual-unhide-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "manual-unhide-moderator", "moderator").await;
 
     repository::hide_puzzle(&pool, puzzle_id, moderator_id, None)
         .await
@@ -500,9 +583,18 @@ async fn moderator_unhide_clears_hidden_state_and_logs(pool: PgPool) {
     assert!(hidden_at.is_none(), "unhide must clear hidden_at");
     assert!(hidden_by.is_none(), "unhide must clear hidden_by");
 
-    let hide_logged = moderation_log_count(&pool, puzzle_id, repository::moderation_action::HIDE_PUZZLE).await;
-    assert_eq!(hide_logged, 1, "the earlier hide_puzzle call must still have its own log row");
-    let unhide_logged = moderation_log_count(&pool, puzzle_id, repository::moderation_action::UNHIDE_PUZZLE).await;
+    let hide_logged =
+        moderation_log_count(&pool, puzzle_id, repository::moderation_action::HIDE_PUZZLE).await;
+    assert_eq!(
+        hide_logged, 1,
+        "the earlier hide_puzzle call must still have its own log row"
+    );
+    let unhide_logged = moderation_log_count(
+        &pool,
+        puzzle_id,
+        repository::moderation_action::UNHIDE_PUZZLE,
+    )
+    .await;
     assert_eq!(
         unhide_logged, 1,
         "unhide_puzzle must append its own second moderation_log row with action = unhide_puzzle"
@@ -511,7 +603,8 @@ async fn moderator_unhide_clears_hidden_state_and_logs(pool: PgPool) {
 
 #[sqlx::test]
 async fn hide_unknown_puzzle_is_not_found(pool: PgPool) {
-    let moderator_id = common::register_test_user_with_role(&pool, "hide-unknown-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "hide-unknown-moderator", "moderator").await;
 
     let result = repository::hide_puzzle(&pool, 999_999, moderator_id, None).await;
     assert!(matches!(result, Err(AppError::NotFound)));
@@ -532,7 +625,8 @@ async fn hidden_puzzle_is_downloadable_by_moderator(pool: PgPool) {
 
     let (puzzle_id, _author_id, _author_token) = build_auto_hidden_puzzle(&pool, app.clone()).await;
 
-    let moderator_id = common::register_test_user_with_role(&pool, "download-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "download-moderator", "moderator").await;
     let moderator_token = common::jwt_for(moderator_id);
 
     let response = download_request(app.clone(), &moderator_token, &puzzle_id.to_string()).await;
@@ -574,7 +668,8 @@ async fn hidden_puzzle_stays_out_of_catalog_for_moderator(pool: PgPool) {
 
     let (puzzle_id, _author_id, _author_token) = build_auto_hidden_puzzle(&pool, app.clone()).await;
 
-    let moderator_id = common::register_test_user_with_role(&pool, "catalog-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "catalog-moderator", "moderator").await;
     let moderator_token = common::jwt_for(moderator_id);
 
     let list_response = list_new_request(app.clone(), &moderator_token).await;
@@ -618,26 +713,53 @@ async fn resolve_report_resolves_same_reason_siblings_only(pool: PgPool) {
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Resolve Siblings").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    let r1 = report_by_new_user(&pool, app.clone(), "resolve-siblings-reporter-1", puzzle_id, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-siblings-reporter-1",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
-    let r2 = report_by_new_user(&pool, app.clone(), "resolve-siblings-reporter-2", puzzle_id, "profane").await;
+    let r2 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-siblings-reporter-2",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r2.status(), StatusCode::OK);
-    let r3 = report_by_new_user(&pool, app.clone(), "resolve-siblings-reporter-3", puzzle_id, "trolling").await;
+    let r3 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-siblings-reporter-3",
+        puzzle_id,
+        "trolling",
+    )
+    .await;
     assert_eq!(r3.status(), StatusCode::OK);
 
     let profane_rows = report_rows_for(&pool, puzzle_id, "profane").await;
     assert_eq!(profane_rows.len(), 2);
     let profane_ids: Vec<i32> = profane_rows.iter().map(|(id, _)| *id).collect();
 
-    let reviewer_id = common::register_test_user_with_role(&pool, "resolve-siblings-moderator", "moderator").await;
+    let reviewer_id =
+        common::register_test_user_with_role(&pool, "resolve-siblings-moderator", "moderator")
+            .await;
 
-    let mut resolved = repository::resolve_report(&pool, profane_ids[0], "upheld", reviewer_id, Some("policy"))
-        .await
-        .expect("resolve_report must succeed");
+    let mut resolved =
+        repository::resolve_report(&pool, profane_ids[0], "upheld", reviewer_id, Some("policy"))
+            .await
+            .expect("resolve_report must succeed");
     resolved.sort();
     let mut expected = profane_ids.clone();
     expected.sort();
-    assert_eq!(resolved, expected, "resolving one profane report must resolve exactly its profane sibling too");
+    assert_eq!(
+        resolved, expected,
+        "resolving one profane report must resolve exactly its profane sibling too"
+    );
 
     let profane_after = report_rows_for(&pool, puzzle_id, "profane").await;
     assert!(
@@ -656,7 +778,8 @@ async fn resolve_report_does_not_hide_or_unhide(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    let reviewer_id = common::register_test_user_with_role(&pool, "resolve-no-hide-moderator", "moderator").await;
+    let reviewer_id =
+        common::register_test_user_with_role(&pool, "resolve-no-hide-moderator", "moderator").await;
 
     // A single resolved-upheld report on an otherwise-unhidden puzzle must not hide it.
     let author_id = common::register_test_user(&pool, "resolve-no-hide-author").await;
@@ -665,14 +788,24 @@ async fn resolve_report_does_not_hide_or_unhide(pool: PgPool) {
     // `puzzles.short_key` is UNIQUE across the whole database, not per author.
     let meta = submit_puzzle(app.clone(), &author_token, "RrRrRrRr", "Resolve No Hide").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
-    let r1 = report_by_new_user(&pool, app.clone(), "resolve-no-hide-reporter", puzzle_id, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-no-hide-reporter",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
     let report_rows = report_rows_for(&pool, puzzle_id, "profane").await;
     repository::resolve_report(&pool, report_rows[0].0, "upheld", reviewer_id, None)
         .await
         .expect("resolve_report must succeed");
     let (hidden_at, _) = hidden_state(&pool, puzzle_id).await;
-    assert!(hidden_at.is_none(), "resolving a report upheld must never hide the puzzle");
+    assert!(
+        hidden_at.is_none(),
+        "resolving a report upheld must never hide the puzzle"
+    );
 
     // Resolving EVERY report of an already auto-hidden puzzle must not unhide it.
     let (hidden_puzzle_id, _hidden_author_id, _hidden_author_token) =
@@ -700,10 +833,18 @@ async fn resolve_report_does_not_ban_author(pool: PgPool) {
     let author_token = common::jwt_for(author_id);
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Resolve No Ban").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
-    let r1 = report_by_new_user(&pool, app.clone(), "resolve-no-ban-reporter", puzzle_id, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-no-ban-reporter",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
     let report_rows = report_rows_for(&pool, puzzle_id, "profane").await;
-    let reviewer_id = common::register_test_user_with_role(&pool, "resolve-no-ban-moderator", "moderator").await;
+    let reviewer_id =
+        common::register_test_user_with_role(&pool, "resolve-no-ban-moderator", "moderator").await;
 
     repository::resolve_report(&pool, report_rows[0].0, "upheld", reviewer_id, None)
         .await
@@ -714,14 +855,18 @@ async fn resolve_report_does_not_ban_author(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .expect("count user_bans");
-    assert_eq!(ban_count, 0, "resolving a report upheld must never insert a ban row");
+    assert_eq!(
+        ban_count, 0,
+        "resolving a report upheld must never insert a ban row"
+    );
 }
 
 #[sqlx::test]
 async fn resolve_unknown_or_already_resolved_report_is_not_found(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
-    let reviewer_id = common::register_test_user_with_role(&pool, "resolve-nf-moderator", "moderator").await;
+    let reviewer_id =
+        common::register_test_user_with_role(&pool, "resolve-nf-moderator", "moderator").await;
 
     let unknown = repository::resolve_report(&pool, 999_999, "upheld", reviewer_id, None).await;
     assert!(matches!(unknown, Err(AppError::NotFound)));
@@ -730,7 +875,14 @@ async fn resolve_unknown_or_already_resolved_report_is_not_found(pool: PgPool) {
     let author_token = common::jwt_for(author_id);
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Resolve Not Found").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
-    let r1 = report_by_new_user(&pool, app.clone(), "resolve-nf-reporter", puzzle_id, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-nf-reporter",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
     let report_rows = report_rows_for(&pool, puzzle_id, "profane").await;
     let report_id = report_rows[0].0;
@@ -752,16 +904,29 @@ async fn resolve_report_rejects_unknown_status(pool: PgPool) {
     let author_token = common::jwt_for(author_id);
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Resolve Bad Status").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
-    let r1 = report_by_new_user(&pool, app.clone(), "resolve-bad-status-reporter", puzzle_id, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "resolve-bad-status-reporter",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
     let report_rows = report_rows_for(&pool, puzzle_id, "profane").await;
-    let reviewer_id = common::register_test_user_with_role(&pool, "resolve-bad-status-moderator", "moderator").await;
+    let reviewer_id =
+        common::register_test_user_with_role(&pool, "resolve-bad-status-moderator", "moderator")
+            .await;
 
-    let result = repository::resolve_report(&pool, report_rows[0].0, "spam", reviewer_id, None).await;
+    let result =
+        repository::resolve_report(&pool, report_rows[0].0, "spam", reviewer_id, None).await;
     assert!(matches!(result, Err(AppError::BadPayload)));
 
     let rows_after = report_rows_for(&pool, puzzle_id, "profane").await;
-    assert_eq!(rows_after[0].1, "pending", "a rejected status value must not modify any row");
+    assert_eq!(
+        rows_after[0].1, "pending",
+        "a rejected status value must not modify any row"
+    );
 }
 
 #[sqlx::test]
@@ -771,11 +936,19 @@ async fn report_queue_shows_author_upheld_counter(pool: PgPool) {
 
     let author_id = common::register_test_user(&pool, "queue-counter-author").await;
     let author_token = common::jwt_for(author_id);
-    let reviewer_id = common::register_test_user_with_role(&pool, "queue-counter-moderator", "moderator").await;
+    let reviewer_id =
+        common::register_test_user_with_role(&pool, "queue-counter-moderator", "moderator").await;
 
     let meta1 = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Queue Counter One").await;
     let puzzle_id1 = meta1["id"].as_i64().expect("submitted id") as i32;
-    let r1 = report_by_new_user(&pool, app.clone(), "queue-counter-reporter-1", puzzle_id1, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "queue-counter-reporter-1",
+        puzzle_id1,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
     let rows1 = report_rows_for(&pool, puzzle_id1, "profane").await;
     repository::resolve_report(&pool, rows1[0].0, "upheld", reviewer_id, None)
@@ -784,7 +957,14 @@ async fn report_queue_shows_author_upheld_counter(pool: PgPool) {
 
     let meta2 = submit_puzzle(app.clone(), &author_token, "RrRrRrRr", "Queue Counter Two").await;
     let puzzle_id2 = meta2["id"].as_i64().expect("submitted id") as i32;
-    let r2 = report_by_new_user(&pool, app.clone(), "queue-counter-reporter-2", puzzle_id2, "trolling").await;
+    let r2 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "queue-counter-reporter-2",
+        puzzle_id2,
+        "trolling",
+    )
+    .await;
     assert_eq!(r2.status(), StatusCode::OK);
     let rows2 = report_rows_for(&pool, puzzle_id2, "trolling").await;
     repository::resolve_report(&pool, rows2[0].0, "upheld", reviewer_id, None)
@@ -793,7 +973,14 @@ async fn report_queue_shows_author_upheld_counter(pool: PgPool) {
 
     // A third, still-pending report on the first puzzle -- proves the queue lists it AND carries
     // the right author-wide counter even for an entry that is itself not yet resolved.
-    let r3 = report_by_new_user(&pool, app.clone(), "queue-counter-reporter-3", puzzle_id1, "unsolvable").await;
+    let r3 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "queue-counter-reporter-3",
+        puzzle_id1,
+        "unsolvable",
+    )
+    .await;
     assert_eq!(r3.status(), StatusCode::OK);
 
     let queue = repository::list_reports(&pool, None, 100, 0)
@@ -803,7 +990,10 @@ async fn report_queue_shows_author_upheld_counter(pool: PgPool) {
         .iter()
         .filter(|entry| entry.author_name == "queue-counter-author")
         .collect();
-    assert!(!author_entries.is_empty(), "the queue must contain at least one entry for this author");
+    assert!(
+        !author_entries.is_empty(),
+        "the queue must contain at least one entry for this author"
+    );
     for entry in author_entries {
         assert_eq!(
             entry.author_upheld_reports, 2,
@@ -817,7 +1007,8 @@ async fn report_queue_shows_author_upheld_counter(pool: PgPool) {
 #[sqlx::test]
 async fn ban_user_does_not_lift_previous_ban(pool: PgPool) {
     let user_id = common::register_test_user(&pool, "ban-coexist-user").await;
-    let moderator_id = common::register_test_user_with_role(&pool, "ban-coexist-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "ban-coexist-moderator", "moderator").await;
 
     let ban1 = repository::ban_user(&pool, user_id, "first offense", moderator_id, None)
         .await
@@ -827,13 +1018,17 @@ async fn ban_user_does_not_lift_previous_ban(pool: PgPool) {
         .expect("second ban must succeed");
     assert_ne!(ban1, ban2, "two bans must be two distinct rows");
 
-    let active_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_bans WHERE user_id = $1 AND lifted_at IS NULL")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .expect("count active bans");
-    assert_eq!(active_count, 2, "two successive bans must both remain active and distinct");
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_bans WHERE user_id = $1 AND lifted_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count active bans");
+    assert_eq!(
+        active_count, 2,
+        "two successive bans must both remain active and distinct"
+    );
 }
 
 #[sqlx::test]
@@ -842,7 +1037,8 @@ async fn lift_ban_targets_a_single_row(pool: PgPool) {
     let app = savez::app(state);
 
     let user_id = common::register_test_user(&pool, "lift-single-user").await;
-    let moderator_id = common::register_test_user_with_role(&pool, "lift-single-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "lift-single-moderator", "moderator").await;
 
     let ban1 = repository::ban_user(&pool, user_id, "first offense", moderator_id, None)
         .await
@@ -868,18 +1064,25 @@ async fn lift_ban_targets_a_single_row(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .expect("fetch ban2");
-    assert!(lifted2.is_none(), "lift_ban must target only the requested row, leaving the second active");
+    assert!(
+        lifted2.is_none(),
+        "lift_ban must target only the requested row, leaving the second active"
+    );
 
     // The user must remain blocked: ban2 is still active.
     let token = common::jwt_for(user_id);
     let body = submit_puzzle(app.clone(), &token, "CuCuCuCu", "Lift Single").await;
-    assert_eq!(body["error"], "banned", "the user must still be blocked by the second, unlifted ban");
+    assert_eq!(
+        body["error"], "banned",
+        "the user must still be blocked by the second, unlifted ban"
+    );
 }
 
 #[sqlx::test]
 async fn lift_ban_twice_is_not_found(pool: PgPool) {
     let user_id = common::register_test_user(&pool, "lift-twice-user").await;
-    let moderator_id = common::register_test_user_with_role(&pool, "lift-twice-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "lift-twice-moderator", "moderator").await;
     let ban_id = repository::ban_user(&pool, user_id, "offense", moderator_id, None)
         .await
         .expect("ban must succeed");
@@ -896,8 +1099,10 @@ async fn lift_ban_twice_is_not_found(pool: PgPool) {
             .expect("fetch ban after first lift");
 
     let other_moderator_id =
-        common::register_test_user_with_role(&pool, "lift-twice-other-moderator", "moderator").await;
-    let second = repository::lift_ban(&pool, ban_id, "second lift attempt", other_moderator_id).await;
+        common::register_test_user_with_role(&pool, "lift-twice-other-moderator", "moderator")
+            .await;
+    let second =
+        repository::lift_ban(&pool, ban_id, "second lift attempt", other_moderator_id).await;
     assert!(matches!(second, Err(AppError::NotFound)));
 
     let (lift_reason_after, lift_moderator_id_after): (Option<String>, Option<uuid::Uuid>) =
@@ -906,7 +1111,10 @@ async fn lift_ban_twice_is_not_found(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .expect("fetch ban after second attempt");
-    assert_eq!(lift_reason, lift_reason_after, "the second lift attempt must not rewrite lift_reason");
+    assert_eq!(
+        lift_reason, lift_reason_after,
+        "the second lift attempt must not rewrite lift_reason"
+    );
     assert_eq!(
         lift_moderator_id, lift_moderator_id_after,
         "the second lift attempt must not rewrite lift_moderator_id"
@@ -915,8 +1123,10 @@ async fn lift_ban_twice_is_not_found(pool: PgPool) {
 
 #[sqlx::test]
 async fn ban_unknown_user_is_not_found(pool: PgPool) {
-    let moderator_id = common::register_test_user_with_role(&pool, "ban-unknown-moderator", "moderator").await;
-    let result = repository::ban_user(&pool, uuid::Uuid::new_v4(), "offense", moderator_id, None).await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "ban-unknown-moderator", "moderator").await;
+    let result =
+        repository::ban_user(&pool, uuid::Uuid::new_v4(), "offense", moderator_id, None).await;
     assert!(matches!(result, Err(AppError::NotFound)));
 }
 
@@ -947,9 +1157,16 @@ async fn set_user_role_promotes_and_logs(pool: PgPool) {
         .expect("fetch role after demotion");
     assert_eq!(role_after, "user");
 
-    let logged =
-        moderation_log_count_str(&pool, &user_id.to_string(), repository::moderation_action::SET_ROLE).await;
-    assert_eq!(logged, 2, "both the promotion and the demotion must each append a set_role log row");
+    let logged = moderation_log_count_str(
+        &pool,
+        &user_id.to_string(),
+        repository::moderation_action::SET_ROLE,
+    )
+    .await;
+    assert_eq!(
+        logged, 2,
+        "both the promotion and the demotion must each append a set_role log row"
+    );
 }
 
 #[sqlx::test]
@@ -979,7 +1196,10 @@ async fn purge_puzzle_frees_short_key(pool: PgPool) {
     let author_token = common::jwt_for(author_id);
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Purge Frees Key").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
-    let short_key = meta["shortKey"].as_str().expect("shortKey is a string").to_string();
+    let short_key = meta["shortKey"]
+        .as_str()
+        .expect("shortKey is a string")
+        .to_string();
 
     let complete_response = app
         .clone()
@@ -989,17 +1209,27 @@ async fn purge_puzzle_frees_short_key(pool: PgPool) {
                 .uri(format!("/v1/puzzles/complete/{puzzle_id}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-token", &author_token)
-                .body(Body::from(json!({ "time": 42.0, "liked": true }).to_string()))
+                .body(Body::from(
+                    json!({ "time": 42.0, "liked": true }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(complete_response.status(), StatusCode::OK);
 
-    let r1 = report_by_new_user(&pool, app.clone(), "purge-frees-reporter", puzzle_id, "profane").await;
+    let r1 = report_by_new_user(
+        &pool,
+        app.clone(),
+        "purge-frees-reporter",
+        puzzle_id,
+        "profane",
+    )
+    .await;
     assert_eq!(r1.status(), StatusCode::OK);
 
-    let moderator_id = common::register_test_user_with_role(&pool, "purge-frees-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "purge-frees-moderator", "moderator").await;
     let returned_short_key = repository::purge_puzzle(&pool, puzzle_id, moderator_id)
         .await
         .expect("purge_puzzle must succeed");
@@ -1018,17 +1248,24 @@ async fn purge_puzzle_frees_short_key(pool: PgPool) {
             .await
             .expect("count completions");
     assert_eq!(completions_count, 0, "no orphaned completions may remain");
-    let reports_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM puzzle_reports WHERE puzzle_id = $1")
-        .bind(puzzle_id)
-        .fetch_one(&pool)
-        .await
-        .expect("count reports");
+    let reports_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM puzzle_reports WHERE puzzle_id = $1")
+            .bind(puzzle_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count reports");
     assert_eq!(reports_count, 0, "no orphaned reports may remain");
 
     // The freed short_key must be immediately reusable by a brand new submission.
     let new_author_id = common::register_test_user(&pool, "purge-frees-new-author").await;
     let new_author_token = common::jwt_for(new_author_id);
-    let new_meta = submit_puzzle(app.clone(), &new_author_token, &short_key, "Reused Short Key").await;
+    let new_meta = submit_puzzle(
+        app.clone(),
+        &new_author_token,
+        &short_key,
+        "Reused Short Key",
+    )
+    .await;
     assert!(
         new_meta.get("id").is_some(),
         "resubmission with the freed shortKey must succeed, not fail with short-key-already-taken"
@@ -1045,18 +1282,28 @@ async fn purge_puzzle_keeps_audit_trail(pool: PgPool) {
     let meta = submit_puzzle(app.clone(), &author_token, "CuCuCuCu", "Purge Audit Trail").await;
     let puzzle_id = meta["id"].as_i64().expect("submitted id") as i32;
 
-    let moderator_id = common::register_test_user_with_role(&pool, "purge-audit-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "purge-audit-moderator", "moderator").await;
     repository::purge_puzzle(&pool, puzzle_id, moderator_id)
         .await
         .expect("purge_puzzle must succeed");
 
-    let logged = moderation_log_count(&pool, puzzle_id, repository::moderation_action::DELETE_PUZZLE).await;
-    assert_eq!(logged, 1, "the audit trail must survive the puzzle's own destruction");
+    let logged = moderation_log_count(
+        &pool,
+        puzzle_id,
+        repository::moderation_action::DELETE_PUZZLE,
+    )
+    .await;
+    assert_eq!(
+        logged, 1,
+        "the audit trail must survive the puzzle's own destruction"
+    );
 }
 
 #[sqlx::test]
 async fn purge_unknown_puzzle_is_not_found(pool: PgPool) {
-    let moderator_id = common::register_test_user_with_role(&pool, "purge-unknown-moderator", "moderator").await;
+    let moderator_id =
+        common::register_test_user_with_role(&pool, "purge-unknown-moderator", "moderator").await;
     let result = repository::purge_puzzle(&pool, 999_999, moderator_id).await;
     assert!(matches!(result, Err(AppError::NotFound)));
 

@@ -93,9 +93,14 @@ pub async fn dispatch(pool: &PgPool, action: ModAction) -> Result<(), CliError> 
             moderator,
         } => {
             let moderator_id = resolve_user(pool, &moderator).await?;
-            let resolved_ids =
-                repository::resolve_report(pool, report_id, status.as_str(), moderator_id, notes.as_deref())
-                    .await?;
+            let resolved_ids = repository::resolve_report(
+                pool,
+                report_id,
+                status.as_str(),
+                moderator_id,
+                notes.as_deref(),
+            )
+            .await?;
             let also_resolved: Vec<i32> = resolved_ids
                 .iter()
                 .copied()
@@ -159,7 +164,8 @@ pub async fn dispatch(pool: &PgPool, action: ModAction) -> Result<(), CliError> 
                 }
                 None => None,
             };
-            let ban_id = repository::ban_user(pool, target_id, &reason, moderator_id, expires_at).await?;
+            let ban_id =
+                repository::ban_user(pool, target_id, &reason, moderator_id, expires_at).await?;
             match expires_at {
                 Some(at) => println!("User {user} banned (ban id {ban_id}), expires at {at}."),
                 None => println!("User {user} banned permanently (ban id {ban_id})."),
@@ -205,10 +211,7 @@ pub async fn dispatch(pool: &PgPool, action: ModAction) -> Result<(), CliError> 
                         entry.target_type,
                         entry.target_id,
                         entry.created_at,
-                        entry
-                            .details
-                            .map(|d| d.to_string())
-                            .unwrap_or_default(),
+                        entry.details.map(|d| d.to_string()).unwrap_or_default(),
                     );
                 }
             }
@@ -245,7 +248,8 @@ pub async fn dispatch(pool: &PgPool, action: ModAction) -> Result<(), CliError> 
                 moderator,
             } => {
                 let moderator_id = resolve_user(pool, &moderator).await?;
-                let inserted = profanity::add_word(pool, &word, lang.as_str(), moderator_id).await?;
+                let inserted =
+                    profanity::add_word(pool, &word, lang.as_str(), moderator_id).await?;
                 if inserted {
                     println!("Word {word:?} ({}) added.", lang.as_str());
                 } else {

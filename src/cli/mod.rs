@@ -354,8 +354,16 @@ mod tests {
     #[test]
     fn mod_resolve_with_invalid_status_fails() {
         assert!(
-            Cli::try_parse_from(["savez", "mod", "resolve", "12", "maybe", "--moderator", "alice"])
-                .is_err(),
+            Cli::try_parse_from([
+                "savez",
+                "mod",
+                "resolve",
+                "12",
+                "maybe",
+                "--moderator",
+                "alice"
+            ])
+            .is_err(),
             "a status outside the ValueEnum closed set must be rejected at parse time"
         );
     }
@@ -393,7 +401,10 @@ mod tests {
 
     #[test]
     fn parse_expires_in_accepts_hours_days_weeks() {
-        assert_eq!(parse_expires_in("24h").unwrap(), chrono::Duration::hours(24));
+        assert_eq!(
+            parse_expires_in("24h").unwrap(),
+            chrono::Duration::hours(24)
+        );
         assert_eq!(parse_expires_in("7d").unwrap(), chrono::Duration::days(7));
         assert_eq!(parse_expires_in("2w").unwrap(), chrono::Duration::weeks(2));
     }

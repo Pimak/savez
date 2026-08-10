@@ -40,7 +40,9 @@ impl ProfanityList {
     /// EXACT token match, never a substring search — a legitimate word that merely CONTAINS a
     /// forbidden word (e.g. a town name containing a slur as a substring) must not match.
     pub fn contains_token(&self, token: &str) -> bool {
-        self.0.binary_search_by(|word| word.as_str().cmp(token)).is_ok()
+        self.0
+            .binary_search_by(|word| word.as_str().cmp(token))
+            .is_ok()
     }
 
     pub fn len(&self) -> usize {
@@ -203,7 +205,10 @@ pub async fn remove_word(pool: &PgPool, word: &str, moderator_id: Uuid) -> Resul
 /// T-07-46 (accept): this function is deliberately never called from any HTTP route — only the
 /// CLI (shell access) exposes the full word list, there is no public endpoint that would let an
 /// unauthenticated caller enumerate every filtered word.
-pub async fn list_words(pool: &PgPool, lang: Option<&str>) -> Result<Vec<(String, String)>, AppError> {
+pub async fn list_words(
+    pool: &PgPool,
+    lang: Option<&str>,
+) -> Result<Vec<(String, String)>, AppError> {
     let rows = sqlx::query!(
         r#"
         SELECT word, lang FROM profanity_words
@@ -230,7 +235,11 @@ mod tests {
             "FUCK".to_string(),
             "Merde".to_string(),
         ]);
-        assert_eq!(list.len(), 3, "case-insensitive duplicates must collapse to one entry");
+        assert_eq!(
+            list.len(),
+            3,
+            "case-insensitive duplicates must collapse to one entry"
+        );
         assert!(list.contains_token("fuck"));
         assert!(list.contains_token("shit"));
         assert!(list.contains_token("merde"));

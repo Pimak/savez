@@ -107,13 +107,14 @@ async fn main() -> std::process::ExitCode {
 
             std::process::ExitCode::SUCCESS
         }
-        savez::cli::Commands::Mod { action } => match savez::cli::moderation::dispatch(&pool, action).await
-        {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::ExitCode::FAILURE
+        savez::cli::Commands::Mod { action } => {
+            match savez::cli::moderation::dispatch(&pool, action).await {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("{err}");
+                    std::process::ExitCode::FAILURE
+                }
             }
-        },
+        }
     }
 }
