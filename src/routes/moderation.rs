@@ -25,10 +25,12 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
+use uuid::Uuid;
 
+use crate::auth::cache::{CacheFetchError, Role};
 use crate::db::AppState;
 use crate::error::AppError;
-use crate::repository::{self, ReportQueueEntry};
+use crate::repository::{self, ModerationLogEntry, ReportQueueEntry};
 use crate::routes::puzzles::parse_puzzle_id;
 
 /// Default page size for the two paginated read routes (`list_reports`/`log`) when the caller
@@ -167,4 +169,136 @@ pub async fn unhide(
     let reason = body.and_then(|Json(payload)| payload.reason);
     repository::unhide_puzzle(&state.pool, id, auth.0.user_id, reason.as_deref()).await?;
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Wire body of `POST /v1/moderation/users/{id}/ban`. `expires_at` absent/null means "permanent" —
+/// see the `ban` handler below for the role-escalation checks this triggers.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BanRequest {
+    pub reason: String,
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Wire body of `POST /v1/moderation/users/{id}/lift-ban`. SPEC §4.6 requires every lift to carry
+/// a reason, mirrored by `repository::lift_ban`'s mandatory `&str` (never `Option`) — so `reason`
+/// stays required here too, not facultative.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiftBanRequest {
+    pub reason: String,
+}
+
+/// Query-string parameters of `GET /v1/moderation/log`. Same shape/rationale as `ReportQuery`'s
+/// `limit`/`offset`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogQuery {
+    #[serde(default)]
+    pub limit: Option<String>,
+    #[serde(default)]
+    pub offset: Option<String>,
+}
+
+/// `DELETE /v1/moderation/puzzles/{id}` (admin). Permanent, irreversible deletion — the ONLY
+/// non-GET/POST route in this project (see `src/lib.rs`'s `CorsLayer` comment for the CORS
+/// consequence).
+pub async fn purge(
+    State(state): State<AppState>,
+    auth: crate::auth::extractor::AdminUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let id = parse_puzzle_id(&id)?;
+    let short_key = repository::purge_puzzle(&state.pool, id, auth.0.user_id).await?;
+    Ok(Json(
+        serde_json::json!({ "success": true, "freedShortKey": short_key }),
+    ))
+}
+
+/// `POST /v1/moderation/users/{id}/ban`. The route declares the weaker of the two role-threshold
+/// extractors (SPEC §4.6, 07-RESEARCH.md Open Question 4): a moderator may issue a TEMPORARY ban
+/// (`expiresAt` present), but a PERMANENT ban (`expiresAt` absent/null) requires `admin` — a check
+/// on the request's CONTENT, not something a route-level role-threshold extractor alone can
+/// express as a gate. This is the exact escalation gap 07-RESEARCH.md's Security Domain section
+/// names (T-07-54): the check below runs BEFORE any repository call, never after.
+///
+/// Second check, an explicit security addition of this plan (not required by any source — ASVS
+/// V4 hygiene): a moderator may never ban a target whose role is >= their own. Without this, a
+/// `moderator` could ban the `admin` supervising them, neutralizing that oversight (T-07-55). The
+/// target's role is read through the same `AuthCache` every protected route already uses — no new
+/// database access pattern, and the residual ~10s staleness window is the same already-accepted
+/// D-10 tradeoff, immaterial to this comparison.
+pub async fn ban(
+    State(state): State<AppState>,
+    auth: crate::auth::extractor::ModeratorUser,
+    Path(id): Path<String>,
+    Json(payload): Json<BanRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let target_id = Uuid::parse_str(id.trim()).map_err(|_| AppError::BadId)?;
+
+    // T-07-54 / SPEC §4.6 "moderator (temp) / admin (perm)": a permanent ban (no expiry) demands
+    // the admin threshold, checked on the request's content before any repository call.
+    if payload.expires_at.is_none() && auth.0.role < Role::Admin {
+        return Err(AppError::NoPermission);
+    }
+
+    // T-07-55, security addition of this plan: a moderator can never outrank-or-tie their target.
+    // A `CacheFetchError::Database` here means the cache's own DB read already failed and was
+    // logged as such by that read -- reduced to a payload-free `Copy` error precisely so it
+    // composes with moka's `Arc`-wrapped coalescing (Pitfall 3, 07-RESEARCH.md). `sqlx::Error::
+    // Protocol` synthesizes the same 500 the ordinary database-failure variant produces elsewhere
+    // in this codebase, without falsely implying a specific pool/connection cause that never
+    // actually occurred.
+    let target_state = state
+        .auth_cache
+        .get(&state.pool, target_id)
+        .await
+        .map_err(|err| match err {
+            CacheFetchError::UnknownUser => AppError::NotFound,
+            CacheFetchError::Database => {
+                AppError::Database(sqlx::Error::Protocol("auth cache read failed".into()))
+            }
+        })?;
+    if target_state.role >= auth.0.role {
+        return Err(AppError::NoPermission);
+    }
+
+    let ban_id = repository::ban_user(
+        &state.pool,
+        target_id,
+        &payload.reason,
+        auth.0.user_id,
+        payload.expires_at,
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "success": true, "banId": ban_id })))
+}
+
+/// `POST /v1/moderation/users/{id}/lift-ban` (admin). `{id}` here is the `user_bans.id` ROW
+/// identifier, NOT a user id, despite the `users` segment earlier in the path — `repository::
+/// lift_ban` (D-11) targets one specific ban row, never "every ban of this user". Documented here
+/// because the SPEC path segment naming could otherwise mislead a future reader into passing a
+/// user id.
+pub async fn lift_ban(
+    State(state): State<AppState>,
+    auth: crate::auth::extractor::AdminUser,
+    Path(id): Path<String>,
+    Json(payload): Json<LiftBanRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let ban_id = parse_puzzle_id(&id)?;
+    repository::lift_ban(&state.pool, ban_id, &payload.reason, auth.0.user_id).await?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// `GET /v1/moderation/log` (admin). Same `limit`/`offset` bounding as `list_reports`.
+pub async fn log(
+    State(state): State<AppState>,
+    _auth: crate::auth::extractor::AdminUser,
+    Query(query): Query<LogQuery>,
+) -> Result<Json<Vec<ModerationLogEntry>>, AppError> {
+    let (limit, offset) = parse_limit_offset(query.limit.as_deref(), query.offset.as_deref())?;
+    Ok(Json(
+        repository::list_moderation_log(&state.pool, limit, offset).await?,
+    ))
 }
