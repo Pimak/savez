@@ -115,6 +115,10 @@ mod tests {
         assert_eq!(config.official_api_url, "https://api.shapez.io");
         assert_eq!(config.port, 15001);
         assert_eq!(config.auth_mode, AuthMode::Oracle);
+        assert_eq!(
+            config.bind_addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
     }
 
     #[test]
@@ -187,5 +191,44 @@ mod tests {
         map.insert("PORT", "not-a-number");
         let err = expect_err(Config::from_lookup(lookup_from(&map)));
         assert!(matches!(err, ConfigError::InvalidPort(v) if v == "not-a-number"));
+    }
+
+    #[test]
+    fn missing_bind_addr_defaults_to_loopback() {
+        // BIND_ADDR is deliberately absent from full_map() — the default must be the nominal
+        // path this test exercises, not an opt-in.
+        let map = full_map();
+        let config = Config::from_lookup(lookup_from(&map)).unwrap();
+        assert_eq!(
+            config.bind_addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn bind_addr_unspecified_v4_parses() {
+        let mut map = full_map();
+        map.insert("BIND_ADDR", "0.0.0.0");
+        let config = Config::from_lookup(lookup_from(&map)).unwrap();
+        assert_eq!(
+            config.bind_addr,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        );
+    }
+
+    #[test]
+    fn bind_addr_ipv6_parses() {
+        let mut map = full_map();
+        map.insert("BIND_ADDR", "::");
+        let config = Config::from_lookup(lookup_from(&map)).unwrap();
+        assert!(matches!(config.bind_addr, std::net::IpAddr::V6(_)));
+    }
+
+    #[test]
+    fn invalid_bind_addr_errors() {
+        let mut map = full_map();
+        map.insert("BIND_ADDR", "pas-une-ip");
+        let err = expect_err(Config::from_lookup(lookup_from(&map)));
+        assert!(matches!(err, ConfigError::InvalidBindAddr(v) if v == "pas-une-ip"));
     }
 }
