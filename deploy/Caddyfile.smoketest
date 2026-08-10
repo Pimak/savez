@@ -1,0 +1,10 @@
+# Recouvrement de smoke test local (D-02) -- HTTP simple, jamais utilisé sur
+# le VPS. L'automatisme HTTPS de Caddy tenterait un vrai challenge ACME
+# contre le domaine placeholder (non résolvable publiquement), ou retomberait
+# sur un certificat auto-signé exigeant `curl --insecure` ; ni l'un ni
+# l'autre ne prouverait davantage que le routage Caddy -> app:15001
+# fonctionne. Le vrai chemin ACME/TLS n'est testable que contre un domaine
+# public réel, explicitement différé (D-05) au déploiement réel.
+:80 {
+    reverse_proxy app:15001
+}
