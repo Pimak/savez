@@ -27,11 +27,12 @@ pub struct PuzzleMetadata {
 /// `GET /v1/puzzles/list/{category}`. This handler's contract changed in Phase 6, hardening D-05's
 /// Phase 3 placeholder: `new` is a real query, newest first (D-04, unchanged). `mine` is now ALSO a
 /// real query (D-13) — it reflects the authenticated caller's own puzzles, including ones they have
-/// hidden (D-10). `top-rated` still returns `200 []` — ranking by likes arrives in Phase 7
-/// (REQ-business-logic) — but this is a recognized category answering an empty list, not an error.
-/// Any OTHER category value is now rejected with the wire code `bad-category`, replacing the
-/// Phase 3 silent-empty-array fallback: this is a deliberate hardening of D-05, not a copy of its
-/// original behavior.
+/// hidden (D-10). `top-rated` (REQ-business-logic, ROADMAP SC1) is now also a real, ranked query
+/// (likes descending, then completions descending, see the repository function it delegates to).
+/// All three recognized categories are now real queries — no placeholder remains. Any OTHER
+/// category value is rejected with the wire code `bad-category`, replacing the Phase 3
+/// silent-empty-array fallback: this is a deliberate hardening of D-05, not a copy of its original
+/// behavior.
 pub async fn list(
     State(state): State<AppState>,
     Path(category): Path<String>,
@@ -42,9 +43,9 @@ pub async fn list(
         "mine" => Ok(Json(
             repository::list_mine(&state.pool, auth.user_id).await?,
         )),
-        // TODO(Phase 7): REQ-business-logic ranks `top-rated` by likes (then completions). Until
-        // then this is a recognized category that always answers an empty list, never an error.
-        "top-rated" => Ok(Json(Vec::new())),
+        "top-rated" => Ok(Json(
+            repository::list_top_rated(&state.pool, auth.user_id).await?,
+        )),
         _ => Err(AppError::BadCategory),
     }
 }
@@ -234,24 +235,41 @@ pub async fn submit(
 /// client-chosen `short_key` is not guaranteed to be non-numeric (structural validation of
 /// submitted `shortKey` values is deferred to Phase 6 — CONTEXT.md Deferred Ideas), so an
 /// id-first lookup could silently resolve an all-digit `short_key` to an unrelated puzzle that
-/// happens to share that numeric `id`. Does NOT increment `downloads` (D-06). `completed` is now
-/// computed relative to the authenticated caller (SC4), and D-05/D-10 both require a token: a
-/// puzzle hidden by a third party resolves to `not-found` for anyone but its own author.
+/// happens to share that numeric `id`. `completed` is computed relative to the authenticated
+/// caller (SC4), and D-05/D-10 both require a token: a puzzle hidden by a third party resolves to
+/// `not-found` for anyone but its own author — resolution failure (either lookup path) returns
+/// before the download counter below is ever touched.
+///
+/// D-19: exactly one successful resolution, by either path above, bumps the stored download
+/// counter exactly once via the repository — never once per branch. `submit` deliberately does NOT
+/// go through this handler when it reads back the puzzle it just created (it calls
+/// `find_puzzle_by_id` directly instead), so a fresh submission is never counted as a download.
+/// The `downloads` value on the response below comes from that repository call's own `RETURNING`,
+/// so the response reflects the download that just happened. `difficulty` on that same response is
+/// computed from the PRE-increment `downloads` (it was already read by the resolution query above)
+/// — a one-count lag with no functional consequence, self-corrects on the very next read, and is
+/// documented here rather than "fixed" with a second, redundant read.
 pub async fn download(
     State(state): State<AppState>,
     Path(id_or_key): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<PuzzleFullData>, AppError> {
-    if let Some(full) =
-        repository::find_puzzle_by_short_key(&state.pool, auth.user_id, &id_or_key).await?
-    {
-        return Ok(Json(full));
-    }
-    let full = match id_or_key.parse::<i32>() {
-        Ok(id) => repository::find_puzzle_by_id(&state.pool, auth.user_id, id).await?,
-        Err(_) => None,
-    };
-    full.map(Json).ok_or(AppError::NotFound)
+    let mut full =
+        match repository::find_puzzle_by_short_key(&state.pool, auth.user_id, &id_or_key).await? {
+            Some(full) => full,
+            None => {
+                let by_id = match id_or_key.parse::<i32>() {
+                    Ok(id) => repository::find_puzzle_by_id(&state.pool, auth.user_id, id).await?,
+                    Err(_) => None,
+                };
+                by_id.ok_or(AppError::NotFound)?
+            }
+        };
+
+    full.meta.downloads =
+        repository::increment_downloads(&state.pool, full.meta.id as i32).await? as u32;
+
+    Ok(Json(full))
 }
 
 /// Wire body of `POST /v1/puzzles/search` (`interfaces` in 06-04-PLAN.md, `api.js:142-154`).
@@ -276,10 +294,12 @@ fn default_any_filter() -> String {
 }
 
 /// `POST /v1/puzzles/search`. Requires `x-token` (D-05/D-06) — see `list`/`download` above for the
-/// same requirement. `difficulty`/`duration` are validated but currently inert: the Phase 6 ->
-/// Phase 7 seam documented in 06-04-PLAN.md `<interfaces>` — `puzzles.difficulty` and
-/// `puzzles.average_time` are never populated by any write path before Phase 7 (D-01 reserves
-/// aggregate columns to REQ-business-logic), so only `search_term` filters the result set today.
+/// same requirement. `difficulty`/`duration` are validated but currently inert: `difficulty`/
+/// `average_time` have been live-computed values since 07-01 (D-14/D-16, ADR 0005), so this is no
+/// longer a data-availability gap — wiring these two filters into a `WHERE` clause is simply out of
+/// this plan's scope (07-02-PLAN.md `<interfaces>` "Hors périmètre"): neither REQ-business-logic
+/// nor the ROADMAP asks for it, and no D-01..D-20 decision covers it. Only `search_term` filters
+/// the result set today.
 pub async fn search(
     State(state): State<AppState>,
     auth: crate::auth::extractor::AuthUser,
