@@ -142,10 +142,10 @@ Décision : `data` est décompressé **à la soumission** (validation immédiate
 
 ### 4.5 Logique métier
 
-- **Compteurs** : `downloads` incrémenté au download, `completions` et `likes` à la complétion.
-- **`average_time`** : moyenne des `time_taken` des complétions.
-- **`difficulty`** : ratio complétions/téléchargements (reprendre la formule des services de gatez-backend comme référence).
-- **`top-rated`** : tri par likes (pondération à affiner ; départager par complétions).
+- **Compteurs** : `downloads` reste le seul agrégat stocké, incrémenté au download (D-19). `completions`, `likes` et `average_time` ne sont **plus** des colonnes stockées — les colonnes correspondantes ont été supprimées par migration et sont désormais calculées à la volée par agrégation sur `puzzle_completions` à chaque lecture (`list`/`search`/`download`), voir `docs/adr/0005-live-computed-aggregates.md` (D-15/D-18).
+- **`average_time`** : moyenne des `time_taken` des complétions, calculée à la volée (D-16).
+- **`difficulty`** : `completions / downloads`, calculée à la volée (D-14) — une valeur **basse** signifie un puzzle **difficile** (peu de joueurs qui l'ont téléchargé sont allés au bout). `NULL` tant que `downloads = 0` (jamais de division par zéro).
+- **`top-rated`** : tri par likes (calculé à la volée), départage par complétions.
 
 ### 4.6 Modération
 
@@ -157,7 +157,7 @@ Trois niveaux portés par `users.role`, chacun incluant les droits du précéden
 |------|--------|
 | `user` | Signaler un puzzle ; supprimer **ses propres** puzzles |
 | `moderator` | Consulter la file de signalements ; masquer/démasquer un puzzle ; résoudre un signalement ; bannir temporairement |
-| `admin` | Suppression définitive ; bans permanents et levées de ban ; promotion/rétrogradation des modérateurs ; accès au journal d'audit |
+| `admin` | Suppression définitive ; bans permanents et levées de ban ; promotion/rétrogradation des modérateurs (`savez mod promote`/`demote` — CLI uniquement, aucune route HTTP dédiée, cf. tableau des routes ci-dessous) ; accès au journal d'audit |
 
 L'auteur du projet est le premier `admin` (créé par seed/CLI, jamais par l'API publique).
 
@@ -165,13 +165,13 @@ L'auteur du projet est le premier `admin` (créé par seed/CLI, jamais par l'API
 
 - **Filtre de vocabulaire** sur le titre (erreur `profane-title`, déjà prévue par le client). Liste de mots configurable, multilingue au minimum EN/FR. Un filtre naïf suffit au lancement — l'objectif est de bloquer l'évident, la modération humaine gère le reste.
 - **Validation structurelle** stricte (cf. 4.2) : émetteurs/objectifs présents, formes valides, placements dans les bounds — élimine les puzzles cassés ou trollesques par construction.
-- **Rate limiting par utilisateur** : plafond de soumissions par heure et par jour (configurable, ex. 5/h, 20/j) pour bloquer le spam ; erreur générique `bad-payload` côté client.
+- **Rate limiting par utilisateur** : plafond de soumissions par heure et par jour (configurable, seedé à 5/h + 20/j en écriture, 500/h en lecture — `savez mod ratelimit set`) pour bloquer le spam ; code d'erreur `ratelimit` côté client (pas `bad-payload`, générique et sans rapport — voir `docs/adr/0007-ratelimit-wire-code.md`).
 
 #### Flux de signalement
 
 1. Un joueur signale un puzzle en jeu (motifs du client : `profane`, `unsolvable`, `trolling`). Un utilisateur ne peut pas signaler son propre puzzle (`can-not-report-your-own-puzzle`) ni signaler deux fois le même.
 2. Le signalement entre en file avec `status = pending`.
-3. **Masquage automatique préventif** : si un puzzle accumule **N signalements `pending` d'utilisateurs distincts** (seuil configurable, défaut : 3), il est masqué automatiquement (`hidden_at` renseigné, `hidden_by = NULL` pour distinguer l'automatique de l'humain) en attendant revue. Le masquage retire le puzzle des listes/recherches mais le laisse accessible à son auteur et aux modérateurs.
+3. **Masquage automatique préventif** : si un puzzle accumule **N signalements `pending` d'utilisateurs distincts** (seuil **fixé à 3 en v1**, constante `AUTO_HIDE_REPORT_THRESHOLD` non exposée à la CLI — à rendre configurable plus tard sur le même modèle que le rate limiting, table de configuration + `savez mod`, si le besoin se confirme), il est masqué automatiquement (`hidden_at` renseigné, `hidden_by = NULL` pour distinguer l'automatique de l'humain) en attendant revue. Le masquage retire le puzzle des listes/recherches mais le laisse accessible à son auteur et aux modérateurs.
 4. Un modérateur passe en revue : il joue/inspecte le puzzle, puis tranche chaque signalement — `upheld` (fondé) ou `rejected` (infondé) — avec le masquage/démasquage correspondant.
 5. Les signalements `upheld` répétés contre un même auteur alimentent la décision de ban (pas d'automatisme : décision humaine, mais le compteur est affiché au modérateur).
 
@@ -183,19 +183,22 @@ L'auteur du projet est le premier `admin` (créé par seed/CLI, jamais par l'API
 
 #### API de modération
 
-Le client du jeu n'expose que le signalement — le reste passe par des routes dédiées, **hors du contrat shapez**, protégées par un middleware de rôle :
+Le client du jeu n'expose que le signalement — le reste passe par huit routes dédiées, **hors du contrat shapez**, protégées par un middleware de rôle (`ModeratorUser`/`AdminUser`, `src/routes/moderation.rs`), telles qu'elles sont réellement livrées :
 
-| Méthode | Route | Rôle | Rôle fonctionnel |
-|---------|-------|------|------------------|
-| GET | `/v1/moderation/reports?status=pending` | moderator | File de revue, paginée |
-| POST | `/v1/moderation/reports/:id/resolve` | moderator | `{ status: "upheld"\|"rejected", notes }` |
-| POST | `/v1/moderation/puzzles/:id/hide` / `unhide` | moderator | Masquage manuel |
-| DELETE | `/v1/moderation/puzzles/:id` | admin | Suppression définitive |
-| POST | `/v1/moderation/users/:id/ban` | moderator (temp) / admin (perm) | `{ reason, expires_at? }` |
+| Méthode | Route | Rôle minimum | Corps |
+|---------|-------|---------------|-------|
+| GET | `/v1/moderation/reports` | moderator | — (`?status=pending\|all\|...`, `limit`, `offset`) |
+| POST | `/v1/moderation/reports/:id/resolve` | moderator | `{ status: "upheld"\|"rejected", notes? }` |
+| POST | `/v1/moderation/puzzles/:id/hide` | moderator | `{ reason? }` (facultatif) |
+| POST | `/v1/moderation/puzzles/:id/unhide` | moderator | `{ reason? }` (facultatif) |
+| DELETE | `/v1/moderation/puzzles/:id` | admin | — |
+| POST | `/v1/moderation/users/:id/ban` | moderator, **admin si permanent** | `{ reason, expiresAt? }` |
 | POST | `/v1/moderation/users/:id/lift-ban` | admin | `{ reason }` |
-| GET | `/v1/moderation/log` | admin | Journal d'audit, paginé |
+| GET | `/v1/moderation/log` | admin | — (`limit`, `offset`) |
 
-**Interface :** pas de panneau web au lancement — ces routes sont consommées par un **CLI d'administration** (sous-commande du binaire serveur, ex. `shapez-puzzle-server mod reports`), ce qui reste dans le périmètre d'apprentissage Rust (`clap`). Un mini panneau web ou une intégration au mod pourront venir plus tard si des modérateurs tiers rejoignent le projet.
+La route de ban applique deux règles de sécurité vérifiées avant tout appel au dépôt de données : un ban **permanent** (`expiresAt` absent) exige le rôle `admin` — un `moderator` ne peut poser qu'un ban **temporaire** ; et, dans tous les cas, un `moderator` ne peut jamais bannir une cible dont le rôle est **supérieur ou égal** au sien (ni un autre `moderator`, ni un `admin`), pour empêcher un modérateur de neutraliser la supervision d'un admin.
+
+**Interface :** pas de panneau web au lancement, et **pas de CLI qui consomme ces routes HTTP par-dessus le réseau** — le texte initial de cette section, qui décrivait un CLI d'administration consommateur des routes `/v1/moderation/*`, est **superseded** par `docs/adr/0004-cli-serve-subcommand.md` (D-04). Le binaire livré expose deux sous-commandes distinctes du même exécutable : `savez serve` (lance le serveur HTTP, dont ces huit routes) et `savez mod <action>` (accède directement à la base de données, sans passer par HTTP). Les routes `/v1/moderation/*` visent une intégration future (client de modération dédié, éventuel panneau web), pas la CLI elle-même. Un mini panneau web ou une intégration au mod pourront venir plus tard si des modérateurs tiers rejoignent le projet.
 
 #### Traçabilité
 

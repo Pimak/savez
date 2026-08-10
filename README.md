@@ -63,6 +63,38 @@ default), and every write is recorded in the append-only moderation log.
 Run `savez mod --help` (or `savez mod <subcommand> --help`) for the full argument list of every
 action.
 
+### Reference moderation walkthrough
+
+The sequence below is the exact command flow a fresh operator can replay end to end against a
+running deployment, without reading any planning document. It assumes `DATABASE_URL`, `JWT_KEY`
+and `OFFICIAL_API_URL` are already set (see [Usage](#usage)) and that at least one puzzle and one
+non-admin account already exist (e.g. seeded via a real `submit`/`login` against the running
+server).
+
+1. `docker compose up -d db`, then in one terminal: `savez serve` (or, in development,
+   `cargo run -- serve`). Confirm it started with `curl localhost:15001/healthz`.
+2. Running the binary with no subcommand at all (`savez` / `cargo run --`) must NOT start the
+   server — it prints help and exits non-zero (D-04, `docs/adr/0004-cli-serve-subcommand.md`).
+3. In a second terminal: `savez mod reports` — an empty deployment prints an empty queue with no
+   error.
+4. `savez mod ratelimit list` — prints the three seeded rate-limit thresholds
+   (`write` 3600s/5, `write` 86400s/20, `read` 3600s/500).
+5. `savez mod profanity list --lang fr` — prints the seeded French word list (at least 25 words).
+6. `savez mod promote <existing pseudo> moderator --moderator admin` — promotes that account and
+   confirms it on stdout.
+7. `savez mod log` — the most recent entry is the `set_role` action step 6 just produced, carrying
+   the promoted pseudo.
+8. `savez mod hide <puzzle id> --reason test --moderator admin`, then
+   `savez mod unhide <puzzle id> --moderator admin` — two confirmations, then two new entries in
+   `savez mod log`.
+9. `savez mod ban <pseudo> --reason test --expires-in 1h --moderator admin` — prints the created
+   ban id; then `savez mod unban <that ban id> --reason erreur --moderator admin` lifts it.
+10. Running any write action with a `--moderator` that does not resolve to a real account fails
+    cleanly (a readable message, a non-zero exit code), never a raw Rust panic.
+
+Every step above must produce readable output, no panic, and no raw Rust error message — the
+moderation audit log (`savez mod log`) should faithfully reflect every action taken.
+
 ## License
 
 This backend is distributed under the **AGPL-3.0** license (see `LICENSE`): anyone
