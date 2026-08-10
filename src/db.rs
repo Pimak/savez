@@ -6,8 +6,9 @@ use sqlx::postgres::PgPoolOptions;
 /// Shared application state threaded through the Axum `Router` via `.with_state()`.
 ///
 /// Does NOT derive `Debug`: `jwt_key` is a secret and must never be trivially printable — same
-/// convention as `Config`. All five fields are cheap to clone: `PgPool` and `reqwest::Client` are
-/// internally `Arc`-backed, and `AuthMode` is `Copy`.
+/// convention as `Config`. All six fields are cheap to clone: `PgPool` and `reqwest::Client` are
+/// internally `Arc`-backed, `AuthMode` is `Copy`, and `AuthCache` wraps a `moka::future::Cache`,
+/// itself internally `Arc`-backed.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -15,7 +16,15 @@ pub struct AppState {
     pub official_api_url: String,
     pub auth_mode: crate::config::AuthMode,
     pub http_client: reqwest::Client,
+    pub auth_cache: crate::auth::cache::AuthCache,
 }
+
+/// TTL for the role/ban cache wrapping every protected-route read of `users.role`/`user_bans`
+/// (D-09, ADR 0006). 10s is the midpoint of D-09's locked 5-15s range: no data pointed more
+/// strongly either direction (07-RESEARCH.md Pattern 5), so the midpoint is the defensible,
+/// non-arbitrary choice. Named constant, never an inline literal — same idiom as
+/// `ORACLE_HTTP_TIMEOUT` above.
+pub const AUTH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Bound on every outbound HTTP call to the oracle (`api.shapez.io`). The official shapez client
 /// itself wraps each call in a 15s `timeoutPromise` (05-RESEARCH.md Assumptions Log A2); a shorter,

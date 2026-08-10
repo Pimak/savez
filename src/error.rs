@@ -57,6 +57,12 @@ pub enum AppError {
     DuplicateReport,
     #[error("no permission")]
     NoPermission,
+    /// D-13's `login` blocking case. `AppError::Banned` is declared here (single definition of the
+    /// wire code) even though nothing yet constructs it in this plan — `login` itself is out of
+    /// this plan's scope (07-04); `src/auth/extractor.rs`'s `AuthRejection::Banned` is the
+    /// currently-active variant covering `submit`/`complete`/`report`.
+    #[error("user is banned")]
+    Banned,
 }
 
 impl AppError {
@@ -89,6 +95,7 @@ impl AppError {
             AppError::CannotReportOwnPuzzle => "can-not-report-your-own-puzzle",
             AppError::DuplicateReport => "bad-payload",
             AppError::NoPermission => "no-permission",
+            AppError::Banned => "banned",
         }
     }
 }
@@ -181,6 +188,7 @@ mod tests {
         "name-already-taken",
         "auth-mode-not-implemented",
         "internal-error",
+        "banned",
     ];
 
     async fn body_to_json(response: Response) -> serde_json::Value {
@@ -220,6 +228,7 @@ mod tests {
             AppError::CannotReportOwnPuzzle,
             AppError::DuplicateReport,
             AppError::NoPermission,
+            AppError::Banned,
         ]
     }
 

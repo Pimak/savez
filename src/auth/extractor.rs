@@ -10,22 +10,32 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
+use crate::auth::cache::{CacheFetchError, Role};
 use crate::db::AppState;
 
 /// The authenticated identity of a request, injected by extracting and validating the `x-token`
-/// header. Carries only `user_id` (== the JWT's `sub` claim) — no role/ban state (D-07, mirrors
-/// `auth::jwt::Claims`'s own minimalism).
+/// header, then reading the current role/ban state from `AppState.auth_cache` (D-09). Neither
+/// `role` nor `banned` is ever a JWT claim — the token stays reduced to `sub`/`exp` (D-06, Phase
+/// 5), which is exactly why this state is re-read (behind a short-TTL cache, not on every request)
+/// rather than trusted from the token itself.
 pub struct AuthUser {
     pub user_id: Uuid,
+    pub role: Role,
+    pub banned: bool,
 }
 
 /// Converges on the same wire format as `src/error.rs::AppError` (D-17): every rejection answers
 /// HTTP 200 with `{ "error": "<code>" }`, never a bare 401 — see
-/// `docs/adr/0003-all-200-error-taxonomy.md`.
+/// `docs/adr/0003-all-200-error-taxonomy.md`. `Infrastructure` is the sole exception, mirroring
+/// `AppError::Database`: a database failure while reading role/ban state must not be disguised as
+/// a business-taxonomy error.
 #[derive(Debug)]
 pub enum AuthRejection {
     MissingToken,
     InvalidToken,
+    Banned,
+    InsufficientRole,
+    Infrastructure,
 }
 
 impl AuthRejection {
@@ -33,14 +43,19 @@ impl AuthRejection {
         match self {
             AuthRejection::MissingToken => "unauthorized",
             AuthRejection::InvalidToken => "bad-token",
+            AuthRejection::Banned => "banned",
+            AuthRejection::InsufficientRole => "no-permission",
+            // Never placed on the wire (see `into_response`'s early return below) -- kept here
+            // only so `code()` stays a total, exhaustive match, mirroring `AppError::code`'s own
+            // discipline for its `Database` variant.
+            AuthRejection::Infrastructure => "internal-error",
         }
     }
 }
 
 impl IntoResponse for AuthRejection {
     fn into_response(self) -> Response {
-        let code = self.code();
-        match self {
+        match &self {
             AuthRejection::MissingToken => {
                 tracing::warn!("rejected request: no auth token presented");
             }
@@ -48,7 +63,21 @@ impl IntoResponse for AuthRejection {
                 // T-05-26: never log the token value itself, only the fact that it failed.
                 tracing::warn!("rejected request: auth token failed validation");
             }
+            AuthRejection::Banned => {
+                tracing::warn!("rejected request: user is banned");
+            }
+            AuthRejection::InsufficientRole => {
+                tracing::warn!("rejected request: insufficient role");
+            }
+            AuthRejection::Infrastructure => {
+                // The sole 5xx path: a role/ban read failure is an infrastructure failure, not a
+                // business-taxonomy error -- same posture as `AppError::Database`, empty body, no
+                // detail leaked to the client.
+                tracing::error!("auth infrastructure failure: role/ban state read failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
+        let code = self.code();
         (StatusCode::OK, Json(serde_json::json!({ "error": code }))).into_response()
     }
 }
@@ -66,9 +95,9 @@ impl IntoResponse for AuthRejection {
 ///   user. Treating it as a credential here would let anyone holding the well-known API key
 ///   authenticate as an arbitrary user — an authentication bypass, not a convenience.
 ///
-/// D-07 (Phase 5 scope): signature + expiration only, no database access. TODO(Phase 7): ban/role
-/// enforcement re-reads current state from the database by `sub` (REQ-moderation) — never a claim
-/// added to the JWT itself (would go stale for the token's full 30-day lifetime, D-06).
+/// Signature + expiration only, no database access — role/ban state is layered on top by
+/// `AuthUser::from_request_parts`, which composes this function's `Uuid` with a call to
+/// `AppState.auth_cache` (REQ-moderation, D-09).
 ///
 /// Single source-of-truth literal for the header name: referenced by name everywhere else in this
 /// module (including tests) so the string appears exactly once in this file.
@@ -77,7 +106,7 @@ const AUTH_HEADER_NAME: &str = "x-token";
 pub(crate) fn authenticate_headers(
     headers: &HeaderMap,
     jwt_key: &str,
-) -> Result<AuthUser, AuthRejection> {
+) -> Result<Uuid, AuthRejection> {
     let token = headers
         .get(AUTH_HEADER_NAME)
         .and_then(|value| value.to_str().ok())
@@ -86,9 +115,7 @@ pub(crate) fn authenticate_headers(
     let claims =
         crate::auth::jwt::validate(jwt_key, token).map_err(|_| AuthRejection::InvalidToken)?;
 
-    Ok(AuthUser {
-        user_id: claims.sub,
-    })
+    Ok(claims.sub)
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -98,7 +125,80 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        authenticate_headers(&parts.headers, &state.jwt_key)
+        let user_id = authenticate_headers(&parts.headers, &state.jwt_key)?;
+        let cached = state
+            .auth_cache
+            .get(&state.pool, user_id)
+            .await
+            .map_err(|err| match err {
+                CacheFetchError::UnknownUser => AuthRejection::InvalidToken,
+                CacheFetchError::Database => AuthRejection::Infrastructure,
+            })?;
+
+        Ok(AuthUser {
+            user_id,
+            role: cached.role,
+            banned: cached.banned,
+        })
+    }
+}
+
+/// Wraps `AuthUser`, additionally rejecting a currently-banned caller (D-13's exact scope: applied
+/// only to `submit`/`complete`/`report` by the plan that consumes this type — `login` gets its own
+/// check, `list`/`search`/`download`/`delete` stay unaffected). No extra database round-trip
+/// beyond `AuthUser`'s own: `banned` is already part of the cached state.
+pub struct ActiveUser(pub AuthUser);
+
+impl FromRequestParts<AppState> for ActiveUser {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = AuthUser::from_request_parts(parts, state).await?;
+        if auth.banned {
+            return Err(AuthRejection::Banned);
+        }
+        Ok(ActiveUser(auth))
+    }
+}
+
+/// Wraps `AuthUser`, additionally requiring `role >= Role::Moderator` (cumulative: an admin also
+/// satisfies this). No extra database round-trip beyond `AuthUser`'s own.
+pub struct ModeratorUser(pub AuthUser);
+
+impl FromRequestParts<AppState> for ModeratorUser {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = AuthUser::from_request_parts(parts, state).await?;
+        if auth.role < Role::Moderator {
+            return Err(AuthRejection::InsufficientRole);
+        }
+        Ok(ModeratorUser(auth))
+    }
+}
+
+/// Wraps `AuthUser`, additionally requiring `role >= Role::Admin`. No extra database round-trip
+/// beyond `AuthUser`'s own.
+pub struct AdminUser(pub AuthUser);
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = AuthUser::from_request_parts(parts, state).await?;
+        if auth.role < Role::Admin {
+            return Err(AuthRejection::InsufficientRole);
+        }
+        Ok(AdminUser(auth))
     }
 }
 
@@ -126,9 +226,9 @@ mod tests {
                 .expect("issue test jwt");
         let headers = headers_with(AUTH_HEADER_NAME, &token);
 
-        let auth_user =
+        let authenticated_id =
             authenticate_headers(&headers, TEST_KEY).expect("valid x-token must authenticate");
-        assert_eq!(auth_user.user_id, user_id);
+        assert_eq!(authenticated_id, user_id);
     }
 
     #[test]
@@ -214,8 +314,8 @@ mod tests {
         ));
     }
 
-    /// D-17: both rejection variants converge on the same wire format as `AppError` — HTTP 200,
-    /// never a bare 401, body `{ "error": "<code>" }`.
+    /// D-17: both pre-existing rejection variants converge on the same wire format as `AppError`
+    /// — HTTP 200, never a bare 401, body `{ "error": "<code>" }`.
     #[tokio::test]
     async fn rejections_respond_200_with_error_code() {
         use http_body_util::BodyExt;
@@ -243,5 +343,55 @@ mod tests {
             body_to_json(response).await,
             serde_json::json!({ "error": "bad-token" })
         );
+    }
+
+    /// REQ-moderation: `Banned` and `InsufficientRole` follow the same 200-with-taxonomy-code
+    /// convention as every other rejection; `Infrastructure` is the sole 5xx exception, mirroring
+    /// `AppError::Database`'s empty-body 500.
+    #[tokio::test]
+    async fn banned_responds_200_with_banned_code() {
+        use http_body_util::BodyExt;
+
+        let response = AuthRejection::Banned.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json body");
+        assert_eq!(body, serde_json::json!({ "error": "banned" }));
+    }
+
+    #[tokio::test]
+    async fn insufficient_role_responds_200_with_no_permission_code() {
+        use http_body_util::BodyExt;
+
+        let response = AuthRejection::InsufficientRole.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json body");
+        assert_eq!(body, serde_json::json!({ "error": "no-permission" }));
+    }
+
+    #[tokio::test]
+    async fn infrastructure_responds_500_with_empty_body() {
+        use http_body_util::BodyExt;
+
+        let response = AuthRejection::Infrastructure.into_response();
+        assert_eq!(response.status().as_u16(), 500);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        assert!(bytes.is_empty(), "expected empty body, got: {bytes:?}");
     }
 }

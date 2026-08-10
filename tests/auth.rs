@@ -220,12 +220,18 @@ async fn submit_attributes_puzzle_to_jwt_user(pool: PgPool) {
     assert_eq!(author_id, user_a.to_string());
 }
 
-/// T-05-25: a JWT can be correctly signed and unexpired yet still name a user that no longer (or
-/// never did) exist in `users` — the `puzzles.author_id` foreign key rejects the write, proving a
-/// signed token alone is not sufficient to create data for an arbitrary `sub`.
+/// T-05-25/T-07-14: a JWT can be correctly signed and unexpired yet still name a user that no
+/// longer (or never did) exist in `users` — proving a signed token alone is not sufficient to
+/// create data for an arbitrary `sub`.
 ///
-/// This is `AppError::Database`, which stays a literal 500 despite the all-200 convention — see
-/// `docs/adr/0003-all-200-error-taxonomy.md`.
+/// Superseded by 07-03 (T-07-14, defense in depth): before this plan, `AuthUser` never touched the
+/// database, so this case only surfaced downstream as a `puzzles.author_id` foreign-key violation
+/// (`AppError::Database`, literal 500). `AuthUser::from_request_parts` now reads role/ban state for
+/// `sub` up front (`AuthCache::get` -> `fetch_role_and_ban`), which finds no row and rejects with
+/// `AuthRejection::InvalidToken` (`bad-token`, HTTP 200) before the handler — let alone the
+/// `INSERT`/foreign key — is ever reached. The request is rejected earlier and with a taxonomy
+/// code instead of a bare 500, but the outcome asserted here (no puzzle row is ever created for an
+/// unknown `sub`) is unchanged.
 #[sqlx::test]
 async fn submit_with_jwt_of_unknown_user_is_rejected(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -246,7 +252,7 @@ async fn submit_with_jwt_of_unknown_user_is_rejected(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_error_code(response, "bad-token").await;
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM puzzles WHERE short_key = $1")
         .bind("RyRyRyRy")
