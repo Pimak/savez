@@ -97,6 +97,20 @@ pub async fn register_test_user_with_role(
     .expect("insert test user with role")
 }
 
+/// Removes every configured rate-limit threshold, so `src/ratelimit.rs::check_and_record` finds
+/// zero rows for any class and returns `Ok(())` immediately -- an unconfigured class imposes no
+/// limit at all (this is the exact same behavior a fresh, never-configured deployment would have,
+/// not a test-only bypass). Call this ONLY in tests that intentionally exceed the migration's
+/// seeded defaults (`20260810000003_rate_limiting.sql`: 5/h + 20/j write, 500/h read) -- never
+/// raise the seeded default values themselves to make a test pass; this helper is the one
+/// sanctioned lever for that.
+pub async fn relax_rate_limits(pool: &sqlx::PgPool) {
+    sqlx::query("DELETE FROM rate_limit_config")
+        .execute(pool)
+        .await
+        .expect("relax rate limits");
+}
+
 /// Inserts a row directly into `user_bans` (bypassing any CLI/HTTP ban flow entirely, none of
 /// which exist yet in this plan) and returns its `id` — needed by a later plan's ban-lifting
 /// tests. `expires_at: None` produces a permanent ban; `Some(...)` a temporary one, mirroring

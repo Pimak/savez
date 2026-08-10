@@ -70,9 +70,17 @@ pub struct LoginResponse {
 ///    scoped role/ban cache entirely: that cache is keyed by an identity this step doesn't have
 ///    yet, and identity establishment is precisely the moment that calls for the freshest read
 ///    (ASVS V2) -- see the repository function called below for the full rationale.
-/// 4. Call the oracle exactly once, no retry -- no database write precedes this call (D-05).
-/// 5. Create the account.
-/// 6. Issue the server JWT. `jsonwebtoken`'s own error is never propagated to the client (it
+/// 4. Resolve the pseudo to an existing `user_id` (`repository::find_user_id`) and, ONLY if the
+///    account already exists, check the D-02 `read`-class rate limit BEFORE the oracle call below
+///    -- saving the (comparatively expensive, network-bound) oracle round-trip for a request
+///    already over quota. A brand-new registration has no `user_id` yet at this point
+///    (`rate_limit_events.user_id` is a foreign key against `users`) and so is structurally exempt
+///    from this check. `TODO(post-v1)`: this leaves first-time registrations unbounded by
+///    rate-limiting; the only remaining barrier for them is the oracle's own DLC-ownership check
+///    below, which is already mandatory for every registration regardless.
+/// 5. Call the oracle exactly once, no retry -- no database write precedes this call (D-05).
+/// 6. Create the account.
+/// 7. Issue the server JWT. `jsonwebtoken`'s own error is never propagated to the client (it
 ///    could describe the signing key).
 ///
 /// Never logs `req.token`, `req.name`, nor the issued JWT.
@@ -88,6 +96,15 @@ pub async fn login(
 
     if repository::is_name_banned(&state.pool, &req.name).await? {
         return Err(AppError::Banned);
+    }
+
+    if let Some(existing_user_id) = repository::find_user_id(&state.pool, &req.name).await? {
+        crate::ratelimit::check_and_record(
+            &state.pool,
+            existing_user_id,
+            crate::ratelimit::RouteClass::Read,
+        )
+        .await?;
     }
 
     auth::oracle::verify_official_ownership(

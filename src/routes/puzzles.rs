@@ -36,11 +36,16 @@ pub struct PuzzleMetadata {
 ///
 /// Stays on `AuthUser`, deliberately not `ActiveUser`: D-13 names four blocked routes and reading
 /// is not one of them — a banned account keeps full read access, including to its own `mine` list.
+///
+/// D-02: `read`-class rate limit, checked as the very first instruction of this handler body
+/// (07-07-PLAN.md `<interfaces>`).
 pub async fn list(
     State(state): State<AppState>,
     Path(category): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Read)
+        .await?;
     match category.as_str() {
         "new" => Ok(Json(repository::list_new(&state.pool, auth.user_id).await?)),
         "mine" => Ok(Json(
@@ -214,11 +219,18 @@ fn decode_puzzle_data(raw: &str) -> Result<PuzzleGameData, AppError> {
 // D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
 // `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs — a banned
 // caller never even reaches `decode_puzzle_data`.
+//
+// D-02: `write`-class rate limit, checked as the FIRST instruction of this handler body, strictly
+// before `decode_puzzle_data` (07-07-PLAN.md `<interfaces>`) — lz-string decompression is the
+// single most expensive step in this whole phase, and a request already past its quota must never
+// consume it.
 pub async fn submit(
     State(state): State<AppState>,
     auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<SubmitPuzzlePayload>,
 ) -> Result<Json<PuzzleMetadata>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
+        .await?;
     let data = decode_puzzle_data(&payload.data)?;
     let title = validation::validate_title(&payload.title)?;
     let short_key = validation::validate_short_key(&payload.short_key)?;
@@ -268,11 +280,15 @@ pub async fn submit(
 /// client-supplied value -- a moderator can download any puzzle direct-access, including one
 /// hidden by a third party, so review/audit work is never blocked by the same visibility rule
 /// that protects ordinary users.
+///
+/// D-02: `read`-class rate limit, checked as the very first instruction of this handler body.
 pub async fn download(
     State(state): State<AppState>,
     Path(id_or_key): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<PuzzleFullData>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Read)
+        .await?;
     let is_moderator = auth.role >= crate::auth::cache::Role::Moderator;
     let mut full = match repository::find_puzzle_by_short_key(
         &state.pool,
@@ -332,11 +348,15 @@ fn default_any_filter() -> String {
 ///
 /// Stays on `AuthUser`: reading is always allowed for a banned account (D-13 names only four
 /// blocked routes, and this isn't one of them).
+///
+/// D-02: `read`-class rate limit, checked as the very first instruction of this handler body.
 pub async fn search(
     State(state): State<AppState>,
     auth: crate::auth::extractor::AuthUser,
     Json(payload): Json<SearchRequest>,
 ) -> Result<Json<Vec<PuzzleMetadata>>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Read)
+        .await?;
     validation::validate_search_filters(
         &payload.search_term,
         &payload.difficulty,
@@ -392,12 +412,16 @@ pub struct ReportRequest {
 ///
 /// D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
 /// `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs.
+///
+/// D-02: `write`-class rate limit, checked as the very first instruction of this handler body.
 pub async fn complete(
     State(state): State<AppState>,
     Path(id): Path<String>,
     auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<CompleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
+        .await?;
     let id = parse_puzzle_id(&id)?;
     if !payload.time.is_finite() || payload.time <= 0.0 {
         return Err(AppError::BadPayload);
@@ -412,12 +436,16 @@ pub async fn complete(
 ///
 /// D-13: one of the four routes blocked for a banned account. `ActiveUser` rejects with
 /// `AuthRejection::Banned` (wire code `banned`) before this handler body ever runs.
+///
+/// D-02: `write`-class rate limit, checked as the very first instruction of this handler body.
 pub async fn report(
     State(state): State<AppState>,
     Path(id): Path<String>,
     auth: crate::auth::extractor::ActiveUser,
     Json(payload): Json<ReportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.0.user_id, crate::ratelimit::RouteClass::Write)
+        .await?;
     let id = parse_puzzle_id(&id)?;
     validation::validate_report_reason(&payload.reason)?;
     repository::insert_report(&state.pool, auth.0.user_id, id, &payload.reason).await?;
@@ -438,11 +466,17 @@ pub async fn report(
 /// banned account (login, submit, complete, report); `delete` is not among them in either source.
 /// Removing one's own content is not an act of harm, and a banned author must still be able to do
 /// it — blocking `delete` too would be a scope expansion this plan has no mandate to make.
+///
+/// D-02: `write`-class rate limit, checked as the very first instruction of this handler body —
+/// `delete` is a write action per the route→class table in `src/ratelimit.rs`, independent of its
+/// ban-blocking status above (D-02 and D-13 are separate axes).
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
     auth: crate::auth::extractor::AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    crate::ratelimit::check_and_record(&state.pool, auth.user_id, crate::ratelimit::RouteClass::Write)
+        .await?;
     let id = parse_puzzle_id(&id)?;
     repository::soft_delete_puzzle(&state.pool, id, auth.user_id).await?;
     Ok(Json(serde_json::json!({ "success": true })))

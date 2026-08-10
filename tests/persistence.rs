@@ -889,6 +889,13 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
 /// aspect, so a failing assertion is never ambiguous about which rule broke.
 #[sqlx::test]
 async fn submit_rejects_invalid_puzzles(pool: PgPool) {
+    // 07-07: `ratelimit::check_and_record` runs as the FIRST instruction of `submit`, before
+    // validation -- even a request this test expects to be rejected for bad data still consumes a
+    // write-quota slot. This test intentionally submits well past the seeded default (5/hour), so
+    // it must relax the config rather than have an unrelated `ratelimit` rejection mask the
+    // validation-error assertions below.
+    common::relax_rate_limits(&pool).await;
+
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
@@ -1588,6 +1595,11 @@ async fn delete_request(
 /// propre puzzle, sans contamination croisée.
 #[sqlx::test]
 async fn completion_upsert_semantics(pool: PgPool) {
+    // 07-07: `complete` is `write`-class (5/hour default) and this test intentionally issues more
+    // than 5 completions across two scenarios -- relaxed here so an unrelated `ratelimit`
+    // rejection never masks the time_taken/liked upsert-semantics assertions below.
+    common::relax_rate_limits(&pool).await;
+
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
