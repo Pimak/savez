@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE puzzles SET downloads = downloads + 1 WHERE id = $1 RETURNING downloads",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "downloads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "downloads"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c5b3e074e4d710258659bc46056c4f9b85082b6676f40f6ecb2ce9f0604e81e1"
+}
