@@ -1,0 +1,140 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.id, r.puzzle_id, p.title AS puzzle_title, p.short_key AS puzzle_short_key,\n               (p.hidden_at IS NOT NULL) AS \"puzzle_hidden!\",\n               reporter.name AS reporter_name, r.reason, r.status, r.created_at,\n               author.name AS author_name,\n               (SELECT COUNT(*) FROM puzzle_reports ur\n                  JOIN puzzles up ON up.id = ur.puzzle_id\n                 WHERE up.author_id = author.id AND ur.status = 'upheld') AS \"author_upheld_reports!\"\n        FROM puzzle_reports r\n        JOIN puzzles p        ON p.id = r.puzzle_id\n        JOIN users reporter   ON reporter.id = r.user_id\n        JOIN users author     ON author.id = p.author_id\n        WHERE ($1::text IS NULL OR r.status = $1)\n        ORDER BY r.created_at ASC, r.id ASC\n        LIMIT $2 OFFSET $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzle_reports",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "puzzle_id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzle_reports",
+            "name": "puzzle_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "puzzle_title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "puzzle_short_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "short_key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "puzzle_hidden!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "reporter_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzle_reports",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzle_reports",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "puzzle_reports",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "author_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "author_upheld_reports!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "28a80f83e897555fdadd0c43698d250b4486cab7e411af078089f182f8bf20cb"
+}

@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH target AS (\n            SELECT puzzle_id, reason FROM puzzle_reports WHERE id = $1 AND status = 'pending'\n        )\n        UPDATE puzzle_reports pr\n        SET status = $2, reviewed_at = now(), reviewer_id = $3, review_notes = $4\n        FROM target\n        WHERE pr.puzzle_id = target.puzzle_id\n          AND pr.reason    = target.reason\n          AND pr.status    = 'pending'\n        RETURNING pr.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzle_reports",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "114f5033b7d77c67e10ef72579954000c7b82c4a4bf85ab71c6fe5bf580c592e"
+}

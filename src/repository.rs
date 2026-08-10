@@ -903,3 +903,162 @@ pub async fn unhide_puzzle(
 
     Ok(())
 }
+
+/// One row of the moderator report queue (SPEC §4.6, ROADMAP SC2/SC4, paginated — role gate is the
+/// CALLER'S responsibility, `ModeratorUser` at the HTTP layer / trusted CLI access, same posture as
+/// `hide_puzzle`/`unhide_puzzle` above).
+///
+/// `author_upheld_reports` is D-06's informative counter: how many `upheld` reports the puzzle's
+/// AUTHOR has accumulated across every puzzle they have ever authored, shown to a moderator to
+/// inform a ban decision that stays human — NEVER an automatic trigger. There is no threshold in
+/// this codebase that reads this value and bans anyone; `ban_user` below never consults it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportQueueEntry {
+    pub id: i32,
+    pub puzzle_id: i32,
+    pub puzzle_title: String,
+    pub puzzle_short_key: String,
+    pub puzzle_hidden: bool,
+    pub reporter_name: String,
+    pub reason: String,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub author_name: String,
+    pub author_upheld_reports: i64,
+}
+
+/// Paginated report queue (`status = None` returns every status; the caller — CLI/HTTP route —
+/// decides the default of `"pending"`, never this function).
+///
+/// The `author_upheld_reports` correlated subquery is accepted here despite running once per row:
+/// the queue is always `LIMIT`-bounded by construction (paginated), and `idx_puzzle_reports_puzzle_
+/// status` (migration 20260810000002) serves it. This is the same "bounded by LIMIT" justification
+/// `list_new`/`list_mine`/`search_puzzles` rely on for their own live-aggregation joins.
+pub async fn list_reports(
+    pool: &PgPool,
+    status: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ReportQueueEntry>, AppError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT r.id, r.puzzle_id, p.title AS puzzle_title, p.short_key AS puzzle_short_key,
+               (p.hidden_at IS NOT NULL) AS "puzzle_hidden!",
+               reporter.name AS reporter_name, r.reason, r.status, r.created_at,
+               author.name AS author_name,
+               (SELECT COUNT(*) FROM puzzle_reports ur
+                  JOIN puzzles up ON up.id = ur.puzzle_id
+                 WHERE up.author_id = author.id AND ur.status = 'upheld') AS "author_upheld_reports!"
+        FROM puzzle_reports r
+        JOIN puzzles p        ON p.id = r.puzzle_id
+        JOIN users reporter   ON reporter.id = r.user_id
+        JOIN users author     ON author.id = p.author_id
+        WHERE ($1::text IS NULL OR r.status = $1)
+        ORDER BY r.created_at ASC, r.id ASC
+        LIMIT $2 OFFSET $3
+        "#,
+        status,
+        limit,
+        offset
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| ReportQueueEntry {
+            id: row.id,
+            puzzle_id: row.puzzle_id,
+            puzzle_title: row.puzzle_title,
+            puzzle_short_key: row.puzzle_short_key,
+            puzzle_hidden: row.puzzle_hidden,
+            reporter_name: row.reporter_name,
+            reason: row.reason,
+            status: row.status,
+            created_at: row.created_at,
+            author_name: row.author_name,
+            author_upheld_reports: row.author_upheld_reports,
+        })
+        .collect())
+}
+
+/// Resolves a report AND every pending sibling report of the SAME puzzle AND the SAME reason
+/// (D-08) — never all pending reports of the puzzle regardless of reason. Example: a puzzle with 2
+/// `profane` reports and 1 `trolling` report: resolving one `profane` report as `upheld` moves both
+/// `profane` rows to `upheld` and leaves the `trolling` row `pending`, untouched.
+///
+/// The CTE below selects the target report's `(puzzle_id, reason)` pair, then the `UPDATE` matches
+/// every `pending` row sharing BOTH — the join predicate on the `reason` column is precisely what
+/// makes this a same-reason resolution rather than a same-puzzle one. Zero rows updated (the
+/// requested `$1` does not exist, or was already resolved — status is no longer `'pending'`) maps
+/// to `AppError::NotFound`, mirroring `soft_delete_puzzle`'s not-found branch.
+///
+/// `status` is validated against the closed set `{"upheld", "rejected"}` before any query runs —
+/// `AppError::BadPayload` otherwise. This function stays total even though the HTTP route/CLI
+/// caller is expected to have validated already: same defense-in-depth discipline as
+/// `validate_report_reason` (ASVS V5), never trusting a single validation layer.
+///
+/// D-06/D-07: this function deliberately touches NEITHER `puzzles.hidden_at` NOR `user_bans` — a
+/// moderator resolving a report `upheld` is a documented DECISION not to hide the puzzle or ban the
+/// author automatically, never an oversight. Hiding is `hide_puzzle`/`unhide_puzzle` (07-05);
+/// banning is `ban_user` below; both remain separate, explicit actions in both directions.
+pub async fn resolve_report(
+    pool: &PgPool,
+    report_id: i32,
+    status: &str,
+    reviewer_id: Uuid,
+    notes: Option<&str>,
+) -> Result<Vec<i32>, AppError> {
+    if status != "upheld" && status != "rejected" {
+        return Err(AppError::BadPayload);
+    }
+
+    let rows = sqlx::query!(
+        r#"
+        WITH target AS (
+            SELECT puzzle_id, reason FROM puzzle_reports WHERE id = $1 AND status = 'pending'
+        )
+        UPDATE puzzle_reports pr
+        SET status = $2, reviewed_at = now(), reviewer_id = $3, review_notes = $4
+        FROM target
+        WHERE pr.puzzle_id = target.puzzle_id
+          AND pr.reason    = target.reason
+          AND pr.status    = 'pending'
+        RETURNING pr.id
+        "#,
+        report_id,
+        status,
+        reviewer_id,
+        notes,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Err(AppError::NotFound);
+    }
+
+    let resolved_ids: Vec<i32> = rows.into_iter().map(|row| row.id).collect();
+    let also_resolved: Vec<i32> = resolved_ids
+        .iter()
+        .copied()
+        .filter(|&id| id != report_id)
+        .collect();
+
+    log_moderation_action(
+        pool,
+        reviewer_id,
+        moderation_action::RESOLVE_REPORT,
+        "report",
+        &report_id.to_string(),
+        Some(serde_json::json!({
+            "status": status,
+            "notes": notes,
+            "also_resolved": also_resolved,
+        })),
+    )
+    .await?;
+
+    Ok(resolved_ids)
+}
