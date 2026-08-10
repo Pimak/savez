@@ -209,8 +209,11 @@ async fn submit_persists_puzzle(pool: PgPool) {
     assert_eq!(row.1, author_id.to_string());
 }
 
-/// A puzzle downloads identically by numeric `id` and by `shortKey`, in the `{ meta, game }`
-/// shape, and an unknown id resolves to 404.
+/// A puzzle resolves identically by numeric `id` and by `shortKey`, in the `{ meta, game }` shape,
+/// and an unknown id resolves to 404. `game` and every `meta` field EXCEPT `downloads`/`difficulty`
+/// must match byte-for-byte across the two lookups -- `downloads`/`difficulty` deliberately differ
+/// (D-19: each successful download increments the counter by exactly 1, so the second lookup's
+/// `downloads` is one higher than the first's).
 #[sqlx::test]
 async fn download_by_id_and_by_short_key(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -272,7 +275,28 @@ async fn download_by_id_and_by_short_key(pool: PgPool) {
     assert_eq!(by_short_key_response.status(), StatusCode::OK);
     let by_short_key_body = body_to_json(by_short_key_response).await;
 
-    assert_eq!(by_id_body, by_short_key_body);
+    assert_eq!(by_id_body["game"], by_short_key_body["game"]);
+    assert_eq!(by_id_body["meta"]["id"], by_short_key_body["meta"]["id"]);
+    assert_eq!(
+        by_id_body["meta"]["shortKey"],
+        by_short_key_body["meta"]["shortKey"]
+    );
+    assert_eq!(
+        by_id_body["meta"]["title"],
+        by_short_key_body["meta"]["title"]
+    );
+    assert_eq!(
+        by_id_body["meta"]["author"],
+        by_short_key_body["meta"]["author"]
+    );
+    assert_eq!(
+        by_id_body["meta"]["completed"],
+        by_short_key_body["meta"]["completed"]
+    );
+    // D-19: each successful download increments the counter -- the second lookup (by short key)
+    // must show exactly one more download than the first (by id), not an equal or unrelated value.
+    assert_eq!(by_id_body["meta"]["downloads"], 1);
+    assert_eq!(by_short_key_body["meta"]["downloads"], 2);
     assert!(by_id_body.get("meta").is_some());
     assert!(by_id_body.get("game").is_some());
     assert_eq!(by_id_body["game"], sample_game_data());
@@ -407,20 +431,60 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
     assert_eq!(list[1]["author"], "test-author");
 }
 
-/// D-05: `top-rated` always answers 200 with an empty array, never an error and never a copy of
-/// `new`'s content, even once puzzles exist — ranking by likes/completions is deliberately still
-/// out of scope for THIS plan (07-01 only bascules the four counters to live aggregation; the
-/// `top-rated` sort itself is plan 07-02's job, see 07-01-PLAN.md `<interfaces>` "Hors périmètre").
-/// TODO(07-02): replace this expectation once REQ-business-logic wires the real top-rated sort.
+/// REQ-business-logic/ROADMAP SC1: `top-rated` ranks by likes descending, ties broken by
+/// completions descending. Three puzzles are set up with deliberately non-monotonic likes/
+/// completions pairs -- (2 likes, 2 completions), (1 like, 5 completions), (1 like, 2 completions)
+/// -- so a naive "sort by completions" or "sort by submission order" would both produce a
+/// different, wrong order than the likes-then-completions rule this test proves.
 #[sqlx::test]
-async fn list_top_rated_returns_empty(pool: PgPool) {
+async fn list_top_rated_orders_by_likes_then_completions(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    let author_id = common::register_test_user(&pool, "test-author").await;
+    let author_id = common::register_test_user(&pool, "top-rated-author").await;
     let token = common::jwt_for(author_id);
 
-    submit_puzzle(app.clone(), &token, "CbCbCbCb", "Some Puzzle").await;
+    // (short_key, [(liker_name, liked)]) -- one completion per entry.
+    let high_likes = submit_puzzle(app.clone(), &token, "SgSgSgSg", "High Likes").await;
+    let high_likes_id = high_likes["id"].as_i64().expect("id is a number");
+    for (name, liked) in [
+        ("tr-high-1", true),
+        ("tr-high-2", true),
+    ] {
+        let user_id = common::register_test_user(&pool, name).await;
+        let user_token = common::jwt_for(user_id);
+        let call =
+            complete_request(app.clone(), Some(&user_token), &high_likes_id.to_string(), 10.0, liked)
+                .await;
+        assert_eq!(call.status(), StatusCode::OK);
+    }
+
+    let high_completions = submit_puzzle(app.clone(), &token, "RcRcRcRc", "High Completions").await;
+    let high_completions_id = high_completions["id"].as_i64().expect("id is a number");
+    for (i, liked) in [true, false, false, false, false].into_iter().enumerate() {
+        let user_id = common::register_test_user(&pool, &format!("tr-mid-{i}")).await;
+        let user_token = common::jwt_for(user_id);
+        let call = complete_request(
+            app.clone(),
+            Some(&user_token),
+            &high_completions_id.to_string(),
+            10.0,
+            liked,
+        )
+        .await;
+        assert_eq!(call.status(), StatusCode::OK);
+    }
+
+    let low = submit_puzzle(app.clone(), &token, "SbSbSbSb", "Low Everything").await;
+    let low_id = low["id"].as_i64().expect("id is a number");
+    for (i, liked) in [true, false].into_iter().enumerate() {
+        let user_id = common::register_test_user(&pool, &format!("tr-low-{i}")).await;
+        let user_token = common::jwt_for(user_id);
+        let call =
+            complete_request(app.clone(), Some(&user_token), &low_id.to_string(), 10.0, liked)
+                .await;
+        assert_eq!(call.status(), StatusCode::OK);
+    }
 
     let response = app
         .oneshot(
@@ -434,26 +498,227 @@ async fn list_top_rated_returns_empty(pool: PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_to_json(response).await;
-    assert_eq!(body, json!([]), "top-rated must return an empty array");
+    let list = body.as_array().expect("top-rated returns a JSON array");
+    let keys: Vec<&str> = list
+        .iter()
+        .map(|p| p["shortKey"].as_str().expect("shortKey is a string"))
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["SgSgSgSg", "RcRcRcRc", "SbSbSbSb"],
+        "expected likes-descending order, completions as the tie-break"
+    );
 }
 
-/// D-06/D-07: downloading a puzzle never increments `downloads` and never flips `completed`.
+/// REQ-business-logic/ROADMAP SC1: two puzzles tied at 0 likes and 0 completions must still come
+/// back in a deterministic order -- the trailing `id DESC` tie-break, not submission order.
 #[sqlx::test]
-async fn download_does_not_increment_counter(pool: PgPool) {
+async fn list_top_rated_tie_breaks_on_id_desc(pool: PgPool) {
     let state = common::test_state(pool.clone());
     let app = savez::app(state);
 
-    let author_id = common::register_test_user(&pool, "test-author").await;
+    let author_id = common::register_test_user(&pool, "tie-break-author").await;
+    let token = common::jwt_for(author_id);
+
+    let first = submit_puzzle(app.clone(), &token, "WrWrWrWr", "Tie First").await;
+    let first_id = first["id"].as_i64().expect("id is a number");
+    let second = submit_puzzle(app.clone(), &token, "WgWgWgWg", "Tie Second").await;
+    let second_id = second["id"].as_i64().expect("id is a number");
+    assert!(
+        second_id > first_id,
+        "test setup requires the second submission to have the higher id"
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/top-rated")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("top-rated returns a JSON array");
+    let keys: Vec<&str> = list
+        .iter()
+        .map(|p| p["shortKey"].as_str().expect("shortKey is a string"))
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["WgWgWgWg", "WrWrWrWr"],
+        "puzzles tied on likes and completions must come back id-descending"
+    );
+}
+
+/// D-10/docs/adr/0002-hidden-by-tri-state.md: `top-rated` uses the same visibility predicate as
+/// `list/new` -- a puzzle hidden by its own author (`POST /v1/puzzles/delete/:id`) must disappear
+/// from `top-rated` for EVERYONE, including that author, unlike `list/mine`.
+#[sqlx::test]
+async fn list_top_rated_excludes_hidden_puzzles(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "hidden-top-rated-author").await;
+    let token = common::jwt_for(author_id);
+
+    let submitted = submit_puzzle(app.clone(), &token, "WbWbWbWb", "Hidden Top Rated").await;
+    let puzzle_id = submitted["id"].as_i64().expect("id is a number");
+
+    let delete_response = delete_request(app.clone(), Some(&token), &puzzle_id.to_string()).await;
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/top-rated")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("top-rated returns a JSON array");
+    assert!(
+        !list.iter().any(|p| p["shortKey"] == "WbWbWbWb"),
+        "top-rated must never show a puzzle hidden by its own author, even to that author"
+    );
+}
+
+/// D-19: two successive downloads of the same puzzle return `downloads` = 1 then 2, and the stored
+/// row matches 2 afterward -- proves the counter increments by exactly 1 per successful download,
+/// evaluated atomically by PostgreSQL.
+#[sqlx::test]
+async fn download_increments_downloads_counter(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "downloads-author").await;
     let token = common::jwt_for(author_id);
 
     submit_puzzle(app.clone(), &token, "CyCyCyCy", "Counter Puzzle").await;
+
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/CyCyCyCy")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_body = body_to_json(first_response).await;
+    assert_eq!(first_body["meta"]["downloads"], 1);
+
+    let second_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/CyCyCyCy")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_body = body_to_json(second_response).await;
+    assert_eq!(second_body["meta"]["downloads"], 2);
+
+    let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
+        .bind("CyCyCyCy")
+        .fetch_one(&pool)
+        .await
+        .expect("puzzle row must exist");
+    assert_eq!(downloads, 2);
+}
+
+/// D-19: a `download` on a nonexistent id resolves to `not-found` and leaves every existing
+/// puzzle's `downloads` untouched -- resolution failure must return before the counter is ever
+/// touched.
+#[sqlx::test]
+async fn failed_download_does_not_increment(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "failed-download-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(app.clone(), &token, "CgCgCgCg", "Untouched Puzzle").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/download/999999")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_error_code(response, "not-found").await;
+
+    let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
+        .bind("CgCgCgCg")
+        .fetch_one(&pool)
+        .await
+        .expect("puzzle row must exist");
+    assert_eq!(
+        downloads, 0,
+        "a failed download must never increment an unrelated puzzle's counter"
+    );
+}
+
+/// D-19: `submit` reads back the puzzle it just created via `find_puzzle_by_id` directly, never
+/// through the `download` handler -- the freshly created row must show `downloads = 0`, not 1.
+#[sqlx::test]
+async fn submit_does_not_increment_downloads(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "submit-no-increment-author").await;
+    let token = common::jwt_for(author_id);
+
+    let submitted = submit_puzzle(app.clone(), &token, "CbCbCbCb", "No Phantom Download").await;
+    assert_eq!(submitted["downloads"], 0);
+
+    let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
+        .bind("CbCbCbCb")
+        .fetch_one(&pool)
+        .await
+        .expect("puzzle row must exist");
+    assert_eq!(
+        downloads, 0,
+        "submit must never count as a download of the puzzle it just created"
+    );
+}
+
+/// D-14/D-19: a puzzle downloaded twice then completed once shows `difficulty` ~= 0.5 on the NEXT
+/// read (`completions / downloads` = 1 / 2) -- proves `downloads` actually feeds `difficulty` once
+/// it stops being permanently 0. Uses a tolerant float comparison, never a strict `==` on `f32`.
+#[sqlx::test]
+async fn difficulty_appears_after_downloads_and_completions(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "difficulty-appears-author").await;
+    let token = common::jwt_for(author_id);
+
+    let submitted = submit_puzzle(app.clone(), &token, "SySySySy", "Difficulty Appears").await;
+    let puzzle_id = submitted["id"].as_i64().expect("id is a number");
 
     for _ in 0..2 {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/v1/puzzles/download/CyCyCyCy")
+                    .uri(format!("/v1/puzzles/download/{puzzle_id}"))
                     .header("x-token", &token)
                     .body(Body::empty())
                     .unwrap(),
@@ -463,35 +728,35 @@ async fn download_does_not_increment_counter(pool: PgPool) {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    let completion = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id.to_string(),
+        15.0,
+        false,
+    )
+    .await;
+    assert_eq!(completion.status(), StatusCode::OK);
+
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/puzzles/list/new")
+                .uri(format!("/v1/puzzles/download/{puzzle_id}"))
                 .header("x-token", &token)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     let body = body_to_json(response).await;
-    let list = body.as_array().expect("list/new returns a JSON array");
-    let entry = list
-        .iter()
-        .find(|p| p["shortKey"] == "CyCyCyCy")
-        .expect("submitted puzzle present in list/new");
-    assert_eq!(entry["downloads"], 0);
-    // `completed` is now CALCULATED per-user via a `LEFT JOIN puzzle_completions` (plan 06-04),
-    // not hardcoded `false` -- it reads `false` here because `test-author` has no
-    // `puzzle_completions` row for this puzzle, not because the field is a dead literal. See
-    // `completed_field_is_per_user` for the proof that it actually varies by caller.
-    assert_eq!(entry["completed"], false);
-
-    let downloads: i32 = sqlx::query_scalar("SELECT downloads FROM puzzles WHERE short_key = $1")
-        .bind("CyCyCyCy")
-        .fetch_one(&pool)
-        .await
-        .expect("puzzle row must exist");
-    assert_eq!(downloads, 0);
+    let difficulty = body["meta"]["difficulty"]
+        .as_f64()
+        .expect("difficulty must be present once downloads > 0");
+    assert!(
+        (difficulty - 0.5).abs() < 0.01,
+        "expected difficulty ~= 0.5 (1 completion / 2 downloads), got {difficulty}"
+    );
 }
 
 /// D-04/D-05: a `data` value that is neither valid JSON (Community Edition format) nor a valid
