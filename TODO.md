@@ -24,9 +24,9 @@ Légende : `[ ]` à faire · `[x]` fait
 - [ ] Configuration par variables d'environnement (`DATABASE_URL`, `JWT_KEY`, `OFFICIAL_API_URL`, port)
 - [ ] **Critère de fin : réponse JSON servie sur :15001**
 
-## Étape 2 — Persistance (SQLx + SQLite)
+## Étape 2 — Persistance (SQLx + PostgreSQL)
 
-- [ ] Dépendance `sqlx` (SQLite), migrations appliquées automatiquement au démarrage
+- [ ] Dépendance `sqlx` (PostgreSQL), migrations appliquées automatiquement au démarrage
 - [ ] Migration initiale — tables :
   - [ ] `users` (id uuid, name unique, email optionnel, password_hash nullable, verified_via, steam_id, role, created_at)
   - [ ] `puzzles` (id autoincrement, short_key unique, title, author_id, data JSON **décompressé**, likes, downloads, completions, difficulty, average_time, locale, hidden_at/hidden_by, created_at)
@@ -105,12 +105,12 @@ Légende : `[ ]` à faire · `[x]` fait
 
 ## Étape 7 — Déploiement (chantier 1, exploitation)
 
-- [ ] Build CI : cible `x86_64-unknown-linux-musl` (binaire statique), release GitHub à chaque tag
-- [ ] Dossier `deploy/` versionné : Caddyfile, unité systemd (`Restart=always`, user dédié non-root, `ProtectSystem=strict`, écoute localhost only), config Litestream, script d'installation, doc de restauration
-- [ ] Litestream → object storage S3-compatible + dump quotidien `sqlite3 .backup` (cron, 30 jours)
-- [ ] `Dockerfile` optionnel (image `scratch` + binaire musl)
-- [ ] Supervision : UptimeRobot/Uptime Kuma sur `/healthz` ; logs `tracing` → stdout/journald
-- [ ] Provisionner VPS (~4-5 €/mois) + nom de domaine (sans « shapez » dans le nom)
+- [x] Build CI : cible `x86_64-unknown-linux-musl` (binaire musl statique vers image distroless), publication GHCR (`ghcr.io/pimak/savez`) à chaque tag `v*` (`.github/workflows/release.yml`)
+- [x] Dossier `deploy/` versionné : fichier Docker Compose de production (app + PostgreSQL + Caddy + Uptime Kuma), Caddyfile, script d'installation (`install.sh`, VPS Debian nu → machine opérationnelle), script de sauvegarde (`backup.sh`), unités systemd du minuteur de sauvegarde (`savez-backup.service`/`.timer` — aucune unité systemd pour le binaire applicatif lui-même, qui tourne comme service Compose), doc de restauration (`RESTORE.md`)
+- [x] Sauvegarde `pg_dump` quotidien vers stockage objet S3-compatible (rétention 30 jours), via `rclone` générique compatible tout fournisseur (aucun fournisseur en dur dans le script)
+- [x] `Dockerfile` multi-étages (musl builder → distroless non-root) — mécanisme de build principal de l'image publiée, plus une simple commodité optionnelle
+- [x] Supervision : UptimeRobot (externe, détecteur principal de panne totale) + Uptime Kuma auto-hébergé (dashboard interne) sur `/healthz` ; logs `tracing` → stdout, lus via `docker compose logs app`
+- [ ] Provisionner un VPS réel (~4-6 €/mois) + acheter un nom de domaine (sans « shapez » dans le nom) + choisir un fournisseur de stockage S3-compatible + exécuter le test de reprise <1h en conditions réelles — checkpoint explicite ouvert (voir `.planning/STATE.md`), à lever avant la Phase 12
 
 ## Chantier 2 — Mod client (après l'étape 5)
 
