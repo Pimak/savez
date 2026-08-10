@@ -60,17 +60,40 @@ pub async fn insert_puzzle(
 /// their own puzzle must NOT keep seeing it here, or they would reasonably conclude the hide
 /// action silently failed. Author-side visibility of a hidden puzzle is preserved elsewhere
 /// (direct download, `list_mine`), never in this listing.
+///
+/// D-15/ADR 0005: `completions`/`likes`/`average_time`/`difficulty` are no longer stored columns
+/// on `puzzles` — they are computed live from a per-puzzle aggregate derived table (grouped by
+/// puzzle id) joined against `puzzle_completions` (D-20's two indexes back this join; measured
+/// 89ms at 8k puzzles / 120k
+/// completions, versus 163-397ms for a `GROUP BY` over the already-joined row set — see
+/// 07-01-PLAN.md `<interfaces>`). `difficulty` (D-14) is `completions / downloads`, `NULL` while
+/// `downloads = 0` (never a division by zero). `average_time` (D-16) is the simple mean of every
+/// `puzzle_completions.time_taken` row for the puzzle. `likes` (D-17) is not monotonic: a player
+/// can push it back down by re-completing with `liked = false`. One query, no N+1.
 pub async fn list_new(
     pool: &PgPool,
     current_user_id: Uuid,
 ) -> Result<Vec<PuzzleMetadata>, AppError> {
     let rows = sqlx::query!(
         r#"
-        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
-               p.average_time, p.title, u.name AS author,
+        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,
+               COALESCE(agg.completions, 0) AS "completions!",
+               COALESCE(agg.likes, 0)       AS "likes!",
+               agg.average_time,
+               CASE WHEN p.downloads = 0 THEN NULL
+                    ELSE (COALESCE(agg.completions, 0)::real / p.downloads)::real
+               END AS difficulty,
                (pc.user_id IS NOT NULL) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
+        LEFT JOIN (
+            SELECT puzzle_id,
+                   COUNT(*)                      AS completions,
+                   COUNT(*) FILTER (WHERE liked) AS likes,
+                   AVG(time_taken)::real         AS average_time
+            FROM puzzle_completions
+            GROUP BY puzzle_id
+        ) agg ON agg.puzzle_id = p.id
         LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
         WHERE p.hidden_at IS NULL
         ORDER BY p.created_at DESC, p.id DESC
@@ -83,8 +106,9 @@ pub async fn list_new(
     Ok(rows
         .into_iter()
         .map(|row| PuzzleMetadata {
-            // Postgres has no unsigned integer type: `id`/`likes`/`downloads`/`completions` come
-            // back as `i32` and must be cast to the client-facing `u32` fields explicitly.
+            // Postgres has no unsigned integer type: `id`/`downloads` come back as `i32`;
+            // `completions`/`likes` come back as `i64` (COUNT's return type) — all four cast to
+            // the client-facing `u32` fields explicitly.
             id: row.id as u32,
             short_key: row.short_key,
             likes: row.likes as u32,
@@ -106,17 +130,33 @@ pub async fn list_new(
 /// this is the deliberate limit case of the visibility rule (D-10 + D-13), not an exception to
 /// it: an author always sees their own puzzles, hidden or not, via `mine`. See
 /// docs/adr/0002-hidden-by-tri-state.md.
+///
+/// D-15/ADR 0005: same live-aggregation derived-table join as `list_new` (see that function's doc
+/// comment for the full D-14/D-16/D-17/D-20 rationale) — only the visibility predicate differs.
 pub async fn list_mine(
     pool: &PgPool,
     current_user_id: Uuid,
 ) -> Result<Vec<PuzzleMetadata>, AppError> {
     let rows = sqlx::query!(
         r#"
-        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
-               p.average_time, p.title, u.name AS author,
+        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,
+               COALESCE(agg.completions, 0) AS "completions!",
+               COALESCE(agg.likes, 0)       AS "likes!",
+               agg.average_time,
+               CASE WHEN p.downloads = 0 THEN NULL
+                    ELSE (COALESCE(agg.completions, 0)::real / p.downloads)::real
+               END AS difficulty,
                (pc.user_id IS NOT NULL) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
+        LEFT JOIN (
+            SELECT puzzle_id,
+                   COUNT(*)                      AS completions,
+                   COUNT(*) FILTER (WHERE liked) AS likes,
+                   AVG(time_taken)::real         AS average_time
+            FROM puzzle_completions
+            GROUP BY puzzle_id
+        ) agg ON agg.puzzle_id = p.id
         LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
         WHERE p.author_id = $1
         ORDER BY p.created_at DESC, p.id DESC
@@ -158,6 +198,10 @@ pub async fn list_mine(
 ///
 /// Visibility predicate: `WHERE p.hidden_at IS NULL` unconditionally, same rationale as
 /// `list_new` — search is a catalog view, not a direct-access or "mine" view.
+///
+/// D-15/ADR 0005: same live-aggregation derived-table join as `list_new` (see that function's doc
+/// comment for the full D-14/D-16/D-17/D-20 rationale) — only the visibility/filter predicate
+/// differs.
 pub async fn search_puzzles(
     pool: &PgPool,
     current_user_id: Uuid,
@@ -170,11 +214,24 @@ pub async fn search_puzzles(
 
     let rows = sqlx::query!(
         r#"
-        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
-               p.average_time, p.title, u.name AS author,
+        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,
+               COALESCE(agg.completions, 0) AS "completions!",
+               COALESCE(agg.likes, 0)       AS "likes!",
+               agg.average_time,
+               CASE WHEN p.downloads = 0 THEN NULL
+                    ELSE (COALESCE(agg.completions, 0)::real / p.downloads)::real
+               END AS difficulty,
                (pc.user_id IS NOT NULL) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
+        LEFT JOIN (
+            SELECT puzzle_id,
+                   COUNT(*)                      AS completions,
+                   COUNT(*) FILTER (WHERE liked) AS likes,
+                   AVG(time_taken)::real         AS average_time
+            FROM puzzle_completions
+            GROUP BY puzzle_id
+        ) agg ON agg.puzzle_id = p.id
         LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
         WHERE p.hidden_at IS NULL AND p.title ILIKE '%' || $2 || '%'
         ORDER BY p.created_at DESC, p.id DESC
@@ -210,6 +267,16 @@ pub async fn search_puzzles(
 /// puzzle hidden by ITS OWN author (D-10): the author can still `download` something they hid,
 /// anyone else gets the same `not-found` as a nonexistent puzzle. See
 /// docs/adr/0002-hidden-by-tri-state.md.
+///
+/// D-15/ADR 0005: unlike `list_new`/`list_mine`/`search_puzzles`, a single-puzzle lookup uses a
+/// direct `LEFT JOIN puzzle_completions pc` grouped by the puzzle's own primary key and the
+/// author's name (measured 0.362ms — cheaper here than building the derived table `list_new`
+/// uses, since there is only one puzzle to aggregate over). Grouping by `p.id` alone would
+/// suffice for every `puzzles` column by functional dependency on the primary key, but `u.name`
+/// (a different table) must be listed explicitly in that grouping clause. `completed` can no
+/// longer come from a second correlated `LEFT JOIN` under aggregation — it is computed as
+/// `COUNT(...) FILTER (WHERE pc.user_id = $1) > 0` instead. See `list_new`'s doc comment for the
+/// full D-14/D-16/D-17/D-20 aggregate-formula rationale, unchanged here.
 pub async fn find_puzzle_by_id(
     pool: &PgPool,
     current_user_id: Uuid,
@@ -217,14 +284,20 @@ pub async fn find_puzzle_by_id(
 ) -> Result<Option<PuzzleFullData>, AppError> {
     let row = sqlx::query!(
         r#"
-        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
-               p.average_time, p.title, u.name AS author,
+        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,
                p.data as "data: Json<PuzzleGameData>",
-               (pc.user_id IS NOT NULL) AS "completed!"
+               COUNT(pc.id)                         AS "completions!",
+               COUNT(pc.id) FILTER (WHERE pc.liked)  AS "likes!",
+               AVG(pc.time_taken)::real              AS average_time,
+               CASE WHEN p.downloads = 0 THEN NULL
+                    ELSE (COUNT(pc.id)::real / p.downloads)::real
+               END AS difficulty,
+               (COUNT(pc.id) FILTER (WHERE pc.user_id = $1) > 0) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
-        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id
         WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.id = $2
+        GROUP BY p.id, u.name
         "#,
         current_user_id,
         id
@@ -288,6 +361,9 @@ pub async fn insert_user(pool: &PgPool, name: &str, verified_via: &str) -> Resul
 /// Resolves a puzzle by `short_key`. Same non-incrementing behavior as `find_puzzle_by_id`
 /// (D-06) and the SAME visibility predicate/rationale (D-10, docs/adr/0002-hidden-by-tri-state.md)
 /// — see that function's doc comment.
+///
+/// D-15/ADR 0005: same point-lookup grouped-aggregation shape as `find_puzzle_by_id` — see that
+/// function's doc comment for the full rationale.
 pub async fn find_puzzle_by_short_key(
     pool: &PgPool,
     current_user_id: Uuid,
@@ -295,14 +371,20 @@ pub async fn find_puzzle_by_short_key(
 ) -> Result<Option<PuzzleFullData>, AppError> {
     let row = sqlx::query!(
         r#"
-        SELECT p.id, p.short_key, p.likes, p.downloads, p.completions, p.difficulty,
-               p.average_time, p.title, u.name AS author,
+        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,
                p.data as "data: Json<PuzzleGameData>",
-               (pc.user_id IS NOT NULL) AS "completed!"
+               COUNT(pc.id)                         AS "completions!",
+               COUNT(pc.id) FILTER (WHERE pc.liked)  AS "likes!",
+               AVG(pc.time_taken)::real              AS average_time,
+               CASE WHEN p.downloads = 0 THEN NULL
+                    ELSE (COUNT(pc.id)::real / p.downloads)::real
+               END AS difficulty,
+               (COUNT(pc.id) FILTER (WHERE pc.user_id = $1) > 0) AS "completed!"
         FROM puzzles p
         JOIN users u ON u.id = p.author_id
-        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1
+        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id
         WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.short_key = $2
+        GROUP BY p.id, u.name
         "#,
         current_user_id,
         short_key
@@ -328,11 +410,13 @@ pub async fn find_puzzle_by_short_key(
 }
 
 /// Upserts a puzzle completion (`POST /v1/puzzles/complete/:id`, D-01/D-02). Does NOT touch any
-/// aggregate counter (`puzzles.likes`/`completions`/`average_time`/`difficulty`) -- the exact same
-/// discipline `find_puzzle_by_id`/`find_puzzle_by_short_key` already apply to `downloads` (D-06):
-/// this function records the event and nothing else.
-/// TODO(Phase 7): REQ-business-logic updates `puzzles.completions`/`puzzles.likes`/
-/// `puzzles.average_time` from this event once aggregate counters are in scope.
+/// aggregate counter -- there is no longer anything to touch: D-15/ADR 0005 made `likes`/
+/// `completions`/`average_time`/`difficulty` derived values computed live from `puzzle_completions`
+/// at read time (`list_new`/`list_mine`/`search_puzzles`/`find_puzzle_by_id`/
+/// `find_puzzle_by_short_key`), not columns maintained by this write path. This function records
+/// the completion event and nothing else, on the same "write records the event, reads derive the
+/// aggregate" discipline `find_puzzle_by_id`/`find_puzzle_by_short_key` already apply to
+/// `downloads` (D-06/D-19).
 ///
 /// D-02 upsert semantics, locked by the SQL below: `time_taken` NEVER regresses (kept at the
 /// minimum of the old and new value), `liked` is ALWAYS overwritten by the latest value sent,
