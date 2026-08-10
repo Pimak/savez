@@ -408,8 +408,10 @@ async fn list_new_returns_submitted_puzzles_newest_first(pool: PgPool) {
 }
 
 /// D-05: `top-rated` always answers 200 with an empty array, never an error and never a copy of
-/// `new`'s content, even once puzzles exist — ranking by likes arrives in Phase 7.
-/// TODO(Phase 7): replace this expectation once REQ-business-logic wires real ranking.
+/// `new`'s content, even once puzzles exist — ranking by likes/completions is deliberately still
+/// out of scope for THIS plan (07-01 only bascules the four counters to live aggregation; the
+/// `top-rated` sort itself is plan 07-02's job, see 07-01-PLAN.md `<interfaces>` "Hors périmètre").
+/// TODO(07-02): replace this expectation once REQ-business-logic wires the real top-rated sort.
 #[sqlx::test]
 async fn list_top_rated_returns_empty(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -533,9 +535,13 @@ async fn submit_rejects_undecodable_payload(pool: PgPool) {
     );
 }
 
-/// Pitfall 1 lock-in: Postgres has no unsigned integer type, so `likes`/`downloads`/`completions`
-/// are stored `i32` and cast to `u32` on the way out. This proves non-zero values round-trip
-/// intact through that cast rather than silently wrapping or truncating.
+/// Pitfall 1 lock-in, updated for D-15/ADR 0005: Postgres has no unsigned integer type, so every
+/// counter is cast to `u32` on the way out, but the source differs per counter now. `downloads`
+/// (D-19) is still a stored `i32` column, updated directly here exactly as before. `likes`/
+/// `completions` are no longer stored columns to `UPDATE` -- they are `COUNT(...)` aggregates
+/// (`i64` at the SQL boundary) computed live from `puzzle_completions`, produced here by three
+/// distinct users completing the puzzle, two of them liking it. All three counters must still
+/// round-trip through their respective casts without wrapping or truncating.
 #[sqlx::test]
 async fn counters_round_trip_as_u32(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -546,16 +552,49 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
 
     submit_puzzle(app.clone(), &token, "CcCcCcCc", "Roundtrip Puzzle").await;
 
-    sqlx::query(
-        "UPDATE puzzles SET likes = $1, downloads = $2, completions = $3 WHERE short_key = $4",
-    )
-    .bind(42_i32)
-    .bind(7_i32)
-    .bind(3_i32)
-    .bind("CcCcCcCc")
-    .execute(&pool)
-    .await
-    .expect("counter update must succeed");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/new")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("list/new returns a JSON array");
+    let entry = list
+        .iter()
+        .find(|p| p["shortKey"] == "CcCcCcCc")
+        .expect("submitted puzzle present in list/new");
+    let puzzle_id = entry["id"].as_i64().expect("puzzle id is a number");
+
+    sqlx::query("UPDATE puzzles SET downloads = $1 WHERE short_key = $2")
+        .bind(7_i32)
+        .bind("CcCcCcCc")
+        .execute(&pool)
+        .await
+        .expect("downloads update must succeed");
+
+    for (name, liked) in [
+        ("roundtrip-liker-1", true),
+        ("roundtrip-liker-2", true),
+        ("roundtrip-liker-3", false),
+    ] {
+        let user_id = common::register_test_user(&pool, name).await;
+        let user_token = common::jwt_for(user_id);
+        let call = complete_request(
+            app.clone(),
+            Some(&user_token),
+            &puzzle_id.to_string(),
+            10.0,
+            liked,
+        )
+        .await;
+        assert_eq!(call.status(), StatusCode::OK);
+    }
 
     let response = app
         .oneshot(
@@ -573,7 +612,7 @@ async fn counters_round_trip_as_u32(pool: PgPool) {
         .iter()
         .find(|p| p["shortKey"] == "CcCcCcCc")
         .expect("submitted puzzle present in list/new");
-    assert_eq!(entry["likes"], 42);
+    assert_eq!(entry["likes"], 2);
     assert_eq!(entry["downloads"], 7);
     assert_eq!(entry["completions"], 3);
 }
@@ -1279,8 +1318,9 @@ async fn delete_request(
 /// D-02: rejoue LITTÉRALEMENT le scénario de référence -- 60s/`liked=false` puis 90s/`liked=true`
 /// sur le même puzzle et le même utilisateur laisse `time_taken=60`, `liked=true`, une seule ligne.
 /// Le cas symétrique (90 puis 60) confirme que `time_taken` ne se dégrade jamais dans les deux
-/// sens. Vérifie aussi la frontière D-01 : les compteurs agrégés de `puzzles` restent inchangés
-/// après les deux appels -- ce test devra être révisé quand la Phase 7 commencera à les alimenter.
+/// sens. Vérifie aussi la frontière D-15 (Phase 7, ADR 0005) : les deux complétions se reflètent
+/// correctement dans les agrégats calculés à la volée exposés par `download`, chacune sur son
+/// propre puzzle, sans contamination croisée.
 #[sqlx::test]
 async fn completion_upsert_semantics(pool: PgPool) {
     let state = common::test_state(pool.clone());
@@ -1382,16 +1422,257 @@ async fn completion_upsert_semantics(pool: PgPool) {
         "time_taken must land on the lower of the two replays"
     );
 
-    // D-01 boundary: no completion call ever touches puzzles' aggregate counters.
-    // TODO(Phase 7): this assertion must be revisited once REQ-business-logic starts maintaining
-    // these columns from the completion event.
-    let aggregates: (i32, i32, Option<f32>) =
-        sqlx::query_as("SELECT completions, likes, average_time FROM puzzles WHERE id = $1")
-            .bind(puzzle_id_1 as i32)
-            .fetch_one(&pool)
-            .await
-            .expect("puzzle row must exist");
-    assert_eq!(aggregates, (0, 0, None));
+    // D-01 boundary, updated for D-15/ADR 0005: `puzzles.completions`/`likes`/`average_time` no
+    // longer exist as stored columns to leave untouched -- the aggregates are derived live from
+    // `puzzle_completions` at read time instead. What the boundary now proves is that the two
+    // completions recorded above (one per puzzle, `liked=true` each) are correctly reflected by
+    // `find_puzzle_by_id` via the HTTP `download` response: exactly 1 completion/1 like per
+    // puzzle, nothing more, nothing borrowed from the other puzzle's row.
+    let download_response_1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{puzzle_id_1}"))
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(download_response_1.status(), StatusCode::OK);
+    let download_body_1 = body_to_json(download_response_1).await;
+    assert_eq!(download_body_1["meta"]["completions"], 1);
+    assert_eq!(download_body_1["meta"]["likes"], 1);
+}
+
+/// D-15/D-16/D-17 (Phase 7, ADR 0005): two distinct users complete the same puzzle, only one of
+/// them liking it -- `download` must report `completions = 2`, `likes = 1`, and `averageTime`
+/// equal to the simple mean of the two recorded `time_taken` values, all computed live from
+/// `puzzle_completions` rather than read from a stored column.
+#[sqlx::test]
+async fn aggregate_counts_reflect_completions(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "aggregate-author").await;
+    let author_token = common::jwt_for(author_id);
+    let liker_id = common::register_test_user(&pool, "aggregate-liker").await;
+    let liker_token = common::jwt_for(liker_id);
+
+    let submitted = submit_puzzle(app.clone(), &author_token, "SgSgSgSg", "Aggregate Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    let first = complete_request(
+        app.clone(),
+        Some(&author_token),
+        &puzzle_id.to_string(),
+        40.0,
+        false,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = complete_request(
+        app.clone(),
+        Some(&liker_token),
+        &puzzle_id.to_string(),
+        60.0,
+        true,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{puzzle_id}"))
+                .header("x-token", &author_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(body["meta"]["completions"], 2);
+    assert_eq!(body["meta"]["likes"], 1);
+    assert_eq!(
+        body["meta"]["averageTime"].as_f64(),
+        Some(50.0),
+        "averageTime must be the simple mean of 40.0 and 60.0"
+    );
+}
+
+/// D-17: `likes` is NOT a monotonic counter -- a user who re-completes a puzzle with
+/// `liked = false` after previously liking it must see `likes` drop back down, while
+/// `completions` (one row per user, upserted) stays at 1.
+#[sqlx::test]
+async fn aggregate_likes_can_decrease(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "decrease-author").await;
+    let token = common::jwt_for(author_id);
+
+    let submitted = submit_puzzle(app.clone(), &token, "RcRcRcRc", "Decrease Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    let liked_call = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id.to_string(),
+        30.0,
+        true,
+    )
+    .await;
+    assert_eq!(liked_call.status(), StatusCode::OK);
+    let unliked_call = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id.to_string(),
+        30.0,
+        false,
+    )
+    .await;
+    assert_eq!(unliked_call.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{puzzle_id}"))
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    assert_eq!(
+        body["meta"]["likes"], 0,
+        "removing a like via re-completion must bring likes back down"
+    );
+    assert_eq!(
+        body["meta"]["completions"], 1,
+        "re-completion upserts the same row, it does not add a second completion"
+    );
+}
+
+/// D-14: `difficulty` stays `null` while `downloads = 0`, even once the puzzle has completions --
+/// never a division by zero. Once `downloads` is forced to a nonzero value (simulating real
+/// download traffic, which this plan does not implement the increment for -- see plan 07-02),
+/// `difficulty` becomes `completions / downloads`.
+#[sqlx::test]
+async fn aggregate_difficulty_is_null_without_downloads(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "difficulty-author").await;
+    let token = common::jwt_for(author_id);
+
+    let submitted = submit_puzzle(app.clone(), &token, "SbSbSbSb", "Difficulty Puzzle").await;
+    let puzzle_id = submitted["id"].as_i64().expect("submitted id is a number");
+
+    let completion = complete_request(
+        app.clone(),
+        Some(&token),
+        &puzzle_id.to_string(),
+        20.0,
+        false,
+    )
+    .await;
+    assert_eq!(completion.status(), StatusCode::OK);
+
+    let response_zero_downloads = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{puzzle_id}"))
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response_zero_downloads.status(), StatusCode::OK);
+    let body_zero_downloads = body_to_json(response_zero_downloads).await;
+    assert_eq!(
+        body_zero_downloads["meta"]["difficulty"],
+        serde_json::Value::Null,
+        "difficulty must be null while downloads = 0, never a division by zero"
+    );
+
+    // A second user completes the same puzzle so completions = 2, then `downloads` is forced to
+    // 4 directly in the database (a dynamic query, never the `query!` macro -- this test-only
+    // write has no business growing the versioned `.sqlx` offline cache, same discipline
+    // `register_test_user` already applies).
+    let second_user_id = common::register_test_user(&pool, "difficulty-second-user").await;
+    let second_token = common::jwt_for(second_user_id);
+    let second_completion = complete_request(
+        app.clone(),
+        Some(&second_token),
+        &puzzle_id.to_string(),
+        25.0,
+        false,
+    )
+    .await;
+    assert_eq!(second_completion.status(), StatusCode::OK);
+
+    sqlx::query("UPDATE puzzles SET downloads = 4 WHERE id = $1")
+        .bind(puzzle_id as i32)
+        .execute(&pool)
+        .await
+        .expect("forcing downloads must succeed");
+
+    let response_with_downloads = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/puzzles/download/{puzzle_id}"))
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response_with_downloads.status(), StatusCode::OK);
+    let body_with_downloads = body_to_json(response_with_downloads).await;
+    assert_eq!(body_with_downloads["meta"]["completions"], 2);
+    assert_eq!(
+        body_with_downloads["meta"]["difficulty"].as_f64(),
+        Some(0.5),
+        "difficulty = completions / downloads = 2 / 4 = 0.5"
+    );
+}
+
+/// A puzzle with zero completions must still appear with `completions = 0`, `likes = 0`,
+/// `averageTime: null` -- the derived-table `LEFT JOIN` must produce these defaults, never drop
+/// the puzzle's row from the listing entirely.
+#[sqlx::test]
+async fn aggregate_average_time_ignores_no_completion(pool: PgPool) {
+    let state = common::test_state(pool.clone());
+    let app = savez::app(state);
+
+    let author_id = common::register_test_user(&pool, "no-completion-author").await;
+    let token = common::jwt_for(author_id);
+
+    submit_puzzle(app.clone(), &token, "RyRyRyRy", "No Completion Puzzle").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/puzzles/list/new")
+                .header("x-token", &token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response).await;
+    let list = body.as_array().expect("list/new returns a JSON array");
+    assert_eq!(list.len(), 1, "the puzzle must still appear in the listing");
+    assert_eq!(list[0]["completions"], 0);
+    assert_eq!(list[0]["likes"], 0);
+    assert_eq!(list[0]["averageTime"], serde_json::Value::Null);
 }
 
 /// D-01/D-02: `:id` non numérique, puzzle inexistant, `time` nul ou négatif, absence de jeton --
