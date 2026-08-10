@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,\n               COALESCE(agg.completions, 0) AS \"completions!\",\n               COALESCE(agg.likes, 0)       AS \"likes!\",\n               agg.average_time,\n               CASE WHEN p.downloads = 0 THEN NULL\n                    ELSE (COALESCE(agg.completions, 0)::real / p.downloads)::real\n               END AS difficulty,\n               (pc.user_id IS NOT NULL) AS \"completed!\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        LEFT JOIN (\n            SELECT puzzle_id,\n                   COUNT(*)                      AS completions,\n                   COUNT(*) FILTER (WHERE liked) AS likes,\n                   AVG(time_taken)::real         AS average_time\n            FROM puzzle_completions\n            GROUP BY puzzle_id\n        ) agg ON agg.puzzle_id = p.id\n        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id AND pc.user_id = $1\n        WHERE p.hidden_at IS NULL AND p.title ILIKE '%' || $2 || '%'\n        ORDER BY p.created_at DESC, p.id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "short_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "short_key"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "downloads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "downloads"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "author",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "completions!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "likes!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "average_time",
+        "type_info": "Float4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "difficulty",
+        "type_info": "Float4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "completed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "548cdaad057e366f6a1c651b9b1f35cf9d3e0df16aa1fb757bf2df355ffaaf57"
+}

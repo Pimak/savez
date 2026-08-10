@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.short_key, p.downloads, p.title, u.name AS author,\n               p.data as \"data: Json<PuzzleGameData>\",\n               COUNT(pc.id)                         AS \"completions!\",\n               COUNT(pc.id) FILTER (WHERE pc.liked)  AS \"likes!\",\n               AVG(pc.time_taken)::real              AS average_time,\n               CASE WHEN p.downloads = 0 THEN NULL\n                    ELSE (COUNT(pc.id)::real / p.downloads)::real\n               END AS difficulty,\n               (COUNT(pc.id) FILTER (WHERE pc.user_id = $1) > 0) AS \"completed!\"\n        FROM puzzles p\n        JOIN users u ON u.id = p.author_id\n        LEFT JOIN puzzle_completions pc ON pc.puzzle_id = p.id\n        WHERE (p.hidden_at IS NULL OR p.author_id = $1) AND p.id = $2\n        GROUP BY p.id, u.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "short_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "short_key"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "downloads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "downloads"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "author",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "data: Json<PuzzleGameData>",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "puzzles",
+            "name": "data"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "completions!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "likes!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "average_time",
+        "type_info": "Float4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "difficulty",
+        "type_info": "Float4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "completed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "53d118502c4b7448c0c6a2001c5bd85640b94c51bf07142c1dd59159e4c8da4e"
+}
