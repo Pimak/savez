@@ -1,0 +1,55 @@
+# Recouvrement de smoke test local (D-02) -- JAMAIS déployé sur le VPS. Utilisé uniquement pour
+# vérifier réellement la stack de production en local, sans domaine réel ni image GHCR publiée :
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.smoketest.yml up -d --build
+#
+services:
+  app:
+    # Construit depuis les sources locales (l'image GHCR ghcr.io/pimak/savez n'existe pas encore
+    # tant qu'aucun tag v* n'a été poussé) au lieu de tirer `image:` du fichier de base.
+    image: savez:smoketest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # Compose concatène par défaut les listes env_file entre fichiers de base et de recouvrement
+    # (pas de fusion clé-par-clé comme `environment:`) -- cette entrée s'ajoute donc APRÈS le
+    # `.env` du fichier de base, et ses valeurs l'emportent sur toute clé en doublon.
+    env_file:
+      - path: smoketest.env
+        required: false
+
+  db:
+    env_file:
+      - path: smoketest.env
+        required: false
+
+  caddy:
+    env_file:
+      - path: smoketest.env
+        required: false
+    # !override (pas de fusion de liste) -- sans ce tag Compose ADDITIONNE les listes au lieu de
+    # les remplacer, et tenterait de lier en plus les ports 80/443 de l'hôte, qui ne sont pas
+    # disponibles/pas voulus pour un smoke test HTTP simple.
+    ports: !override
+      - "8080:80"
+    # !override -- sans ce tag, deux montages viseraient la même cible /etc/caddy/Caddyfile
+    # (celui du fichier de base ET celui-ci), ce que Compose refuse.
+    volumes: !override
+      - ./Caddyfile.smoketest:/etc/caddy/Caddyfile:ro
+
+  # Point de terminaison S3-compatible réel pour le plan de sauvegarde suivant (08-03) -- sa seule
+  # raison d'être est de donner à `rclone` un vrai backend contre lequel s'exécuter en local.
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    command: ["server", "/data"]
+    env_file:
+      - path: smoketest.env
+        required: false
+    ports:
+      - "9000:9000"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  minio_data:

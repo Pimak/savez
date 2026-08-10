@@ -1,0 +1,83 @@
+# Stack de production (deploy/, DEC-deployment-architecture) -- VPS unique, quatre services.
+#
+# Invariants de sécurité non négociables (T-08-07, T-08-08) :
+#   1. Aucune clé `ports:` ne doit apparaître sur un service autre que `caddy`. Publier `db` ou
+#      `app` "temporairement pour déboguer" rend le service directement joignable depuis
+#      Internet, sans aucun contrôle applicatif entre les deux.
+#   2. Ne JAMAIS compter sur `ufw` pour rattraper une publication de port oubliée : `ufw` gère la
+#      chaîne iptables `INPUT` (trafic destiné au processus hôte), alors que Docker écrit ses
+#      règles de publication de port dans les chaînes `DOCKER`/`FORWARD` via NAT/PREROUTING,
+#      évaluées AVANT `ufw` et qui ne traversent jamais `INPUT`. C'est un comportement Docker
+#      documenté et intentionnel, pas un bug -- la seule protection fiable est de ne jamais
+#      publier le port en premier lieu.
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    # POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB sont fournis directement au conteneur par
+    # env_file (ci-dessous), l'image officielle postgres les lit nativement -- pas de bloc
+    # `environment:` dupliquant ces mêmes clés ici.
+    env_file:
+      - path: .env
+        required: false
+    # Aucune clé `ports:` -- le remappage 5433:5432 du docker-compose.yml de dev est une
+    # commodité liée à un conflit de port sur la machine Windows de développement, sans place ici.
+    volumes:
+      # Répertoire parent, PAS .../data -- postgres:18 a déplacé PGDATA dans un sous-chemin versionné.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-savez} -d ${POSTGRES_DB:-savez}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: ghcr.io/pimak/savez:${SAVEZ_VERSION:-latest}
+    restart: unless-stopped
+    # Redondant avec le CMD du Dockerfile mais explicite : ADR 0004 interdit toute invocation nue
+    # (`savez` sans sous-commande n'a plus démarré le serveur depuis la Phase 7).
+    command: ["serve"]
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    # Aucune clé `ports:` -- `app` n'est joignable que via le reverse proxy `caddy` sur le réseau
+    # interne Compose (`app:15001`), jamais directement depuis l'hôte ou Internet.
+    #
+    # Aucun bloc `healthcheck:` -- l'image distroless finale n'a ni shell ni curl/wget (aucun
+    # binaire de sonde possible) ; la vivacité est surveillée de l'extérieur sur /healthz
+    # (UptimeRobot + Uptime Kuma, D-08), et `depends_on: db: condition: service_healthy` +
+    # `connect_with_retry` (src/main.rs) couvrent déjà la course au démarrage de PostgreSQL.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    # Seul service publiant des ports dans tout ce fichier.
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+  kuma:
+    image: louislam/uptime-kuma:2
+    restart: unless-stopped
+    volumes:
+      - kuma_data:/app/data
+    # Aucune clé `ports:` -- dashboard interne par défaut. Exposition optionnelle via le bloc
+    # `status.{$DOMAIN}` commenté dans deploy/Caddyfile, documentée dans deploy/RESTORE.md.
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+  kuma_data:
