@@ -188,5 +188,5 @@ rclone lsf backup:${RCLONE_BUCKET}/savez/ | sort | tail -n1   # nouvel objet .sq
 
 Ce runbook n'a pas encore été exécuté contre un VPS réel : le déploiement réel (accès HTTPS
 réel, test de reprise réel en conditions de production) reste un **checkpoint explicitement
-ouvert**, documenté dans `.planning/STATE.md`, à lever avant la Phase 12 (publication du mod, qui
+ouvert**, suivi dans `TODO.md` sous *Étape 7*, à lever avant la Phase 12 (publication du mod, qui
 a besoin d'un serveur public réel).

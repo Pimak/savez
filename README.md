@@ -24,7 +24,7 @@ Self-hosted, open-source Rust backend for shapez 1's community puzzle mode, with
 
 ## Development status
 
-The project has completed **phase 8 of 12** (deployment artifacts): business logic and moderation (phase 7) plus a complete, locally smoke-tested deployment stack — Dockerfile, production Docker Compose (app + PostgreSQL + Caddy + Uptime Kuma), backup chain, bootstrap script, and recovery runbook (see [Deployment](#deployment)). See `docs/cahier-des-charges.md` for the full specification and `.planning/ROADMAP.md` for the detailed roadmap.
+The project has completed **phase 8 of 12** (deployment artifacts): business logic and moderation (phase 7) plus a complete, locally smoke-tested deployment stack — Dockerfile, production Docker Compose (app + PostgreSQL + Caddy + Uptime Kuma), backup chain, bootstrap script, and recovery runbook (see [Deployment](#deployment)). See `docs/cahier-des-charges.md` for the full specification, `TODO.md` for the step-by-step delivery status, and `docs/adr/` for the recorded design decisions.
 
 ## Usage
 
@@ -102,8 +102,10 @@ moderation audit log (`savez mod log`) should faithfully reflect every action ta
 > [!NOTE]
 > No real deployment has happened yet, consistent with this project's Draft status: all artifacts
 > below are produced and smoke-tested locally against the real Docker Compose stack, but no VPS or
-> domain has been provisioned. See `.planning/STATE.md` for the explicit open checkpoint and its
-> deadline (before Phase 12).
+> domain has been provisioned. Four things are still outstanding and must all be done before
+> Phase 12: provision a real VPS, buy a domain name, pick an S3-compatible storage provider, and
+> run the `deploy/RESTORE.md` under-one-hour recovery drill for real. `TODO.md` tracks this as a
+> single open checkpoint under *Étape 7*.
 
 A container image is published to GHCR (`ghcr.io/pimak/savez`) on every `v*` tag by
 `.github/workflows/release.yml`, built from the multi-stage `Dockerfile` (musl builder →
