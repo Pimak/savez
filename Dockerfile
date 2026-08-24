@@ -2,8 +2,8 @@
 #
 # Build multi-étages : compile un binaire musl statique pour x86_64-unknown-linux-musl dans
 # l'étage builder, puis le copie seul dans une image finale distroless non-root. Voir
-# docs/adr/0004-cli-serve-subcommand.md (invocation `serve` explicite obligatoire) et
-# .planning/phases/08-d-ploiement/08-RESEARCH.md (Pitfalls 1/3/4) pour le rationale complet.
+# docs/adr/0004-cli-serve-subcommand.md (invocation `serve` explicite obligatoire) pour le
+# rationale complet.
 
 FROM rust:slim-bookworm AS builder
 

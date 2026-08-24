@@ -110,7 +110,7 @@ Légende : `[ ]` à faire · `[x]` fait
 - [x] Sauvegarde `pg_dump` quotidien vers stockage objet S3-compatible (rétention 30 jours), via `rclone` générique compatible tout fournisseur (aucun fournisseur en dur dans le script)
 - [x] `Dockerfile` multi-étages (musl builder → distroless non-root) — mécanisme de build principal de l'image publiée, plus une simple commodité optionnelle
 - [x] Supervision : UptimeRobot (externe, détecteur principal de panne totale) + Uptime Kuma auto-hébergé (dashboard interne) sur `/healthz` ; logs `tracing` → stdout, lus via `docker compose logs app`
-- [ ] Provisionner un VPS réel (~4-6 €/mois) + acheter un nom de domaine (sans « shapez » dans le nom) + choisir un fournisseur de stockage S3-compatible + exécuter le test de reprise <1h en conditions réelles — checkpoint explicite ouvert (voir `.planning/STATE.md`), à lever avant la Phase 12
+- [ ] Provisionner un VPS réel (~4-6 €/mois) + acheter un nom de domaine (sans « shapez » dans le nom) + choisir un fournisseur de stockage S3-compatible + exécuter le test de reprise <1h en conditions réelles — checkpoint explicite ouvert, à lever avant la Phase 12
 
 ## Chantier 2 — Mod client (après l'étape 5)
 

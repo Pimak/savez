@@ -6,9 +6,9 @@
 # ajustable ici -- la procédure de restauration correspondante est documentée dans
 # deploy/RESTORE.md.
 #
-# Mode strict volontairement à l'opposé du `set -u` relâché de .planning/scripts/sync.sh : une
-# sauvegarde qui échoue silencieusement est pire qu'une sauvegarde absente. Toute défaillance
-# doit sortir en non-zéro pour que systemd (Type=oneshot) la marque en `failed`.
+# Mode strict volontairement sans concession : une sauvegarde qui échoue silencieusement est pire
+# qu'une sauvegarde absente. Toute défaillance doit sortir en non-zéro pour que systemd
+# (Type=oneshot) la marque en `failed`.
 set -euo pipefail
 
 # Chemin du fichier Compose de production, surchargeable pour permettre d'éprouver ce script
