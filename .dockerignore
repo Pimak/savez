@@ -22,9 +22,9 @@ target/
 .env
 
 # ---------------------------------------------------------------------------
-# Outillage Claude Code / planification -- dépôts distincts, rien à faire dans une couche
-# d'image publiée sur un registre public (savez-git-layout : .planning/ est un dépôt git séparé
-# monté/joint dans l'arborescence).
+# Outillage local et planification -- dépôts distincts, rien à faire dans une couche d'image
+# publiée sur un registre public (.planning/ est un dépôt git séparé monté/joint dans
+# l'arborescence).
 # ---------------------------------------------------------------------------
 .claude/
 .planning/
