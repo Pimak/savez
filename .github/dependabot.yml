@@ -1,0 +1,47 @@
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # Rust / Cargo -- single crate, manifest at the repository root.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+    groups:
+      # Minor and patch bumps land as one PR so the weekly noise stays reviewable.
+      # Majors are deliberately left ungrouped: each one gets its own PR, because
+      # each needs its own read of the changelog.
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions -- ci.yml and release.yml.
+  #
+  # Note: `dtolnay/rust-toolchain@stable` (ci.yml) is pinned to a *branch*, not a
+  # version tag, so Dependabot cannot and will not bump it. That is intended --
+  # the toolchain should track stable. Every other action is on a major tag and
+  # is updated here.
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Paris"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      # Action bumps are few and low-risk: one PR for the lot.
+      github-actions:
+        patterns: ["*"]
